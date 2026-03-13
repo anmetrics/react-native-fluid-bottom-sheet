@@ -50,4 +50,32 @@ export interface BottomSheetProps {
 
   /** Theme colors */
   theme?: BottomSheetTheme
+
+  // --- Accessibility ---
+  accessibilityLabel?: string
+  accessibilityRole?: string
+  closeButtonAccessibilityLabel?: string
+
+  // --- Haptics ---
+  /** Enable haptic feedback on snap and close. Default: false */
+  enableHaptics?: boolean
+
+  // --- Keyboard ---
+  /** Keyboard avoidance behavior. Default: 'padding' */
+  keyboardBehavior?: 'padding' | 'height' | 'none'
+
+  // --- Callbacks ---
+  onSnap?: (index: number) => void
+  onAnimate?: (fromValue: number, toValue: number) => void
+}
+
+export interface BottomSheetRef {
+  /** Expand the sheet to the specified snap point index or max height if not provided */
+  expand: (index?: number) => void
+  /** Collapse the sheet to the smallest snap point (not fully close) */
+  collapse: () => void
+  /** Completely close the sheet */
+  close: () => void
+  /** Snap to a specific index */
+  snapTo: (index: number) => void
 }
