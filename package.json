@@ -1,0 +1,60 @@
+{
+  "name": "react-native-fluid-bottom-sheet",
+  "version": "0.1.0",
+  "description": "A performant, gesture-driven bottom sheet for React Native with snap points, search bar, and FlatList support.",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "react-native": "src/index.ts",
+  "source": "src/index.ts",
+  "files": [
+    "src",
+    "lib",
+    "!**/__tests__"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf lib",
+    "prepare": "tsc -p tsconfig.build.json"
+  },
+  "keywords": [
+    "react-native",
+    "bottom-sheet",
+    "gesture",
+    "reanimated",
+    "snap-points",
+    "modal",
+    "sheet"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/anmetrics/react-native-fluid-bottom-sheet.git"
+  },
+  "author": "anmetrics",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/anmetrics/react-native-fluid-bottom-sheet/issues"
+  },
+  "homepage": "https://github.com/anmetrics/react-native-fluid-bottom-sheet#readme",
+  "peerDependencies": {
+    "react": ">=18.0.0",
+    "react-native": ">=0.70.0",
+    "react-native-gesture-handler": ">=2.0.0",
+    "react-native-reanimated": ">=3.0.0",
+    "react-native-safe-area-context": ">=4.0.0"
+  },
+  "peerDependenciesMeta": {
+    "react-native-safe-area-context": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/react": "^18.2.0",
+    "react": "^18.2.0",
+    "react-native": "^0.73.0",
+    "react-native-gesture-handler": "^2.14.0",
+    "react-native-reanimated": "^3.6.0",
+    "react-native-safe-area-context": "^4.8.0",
+    "typescript": "^5.3.0"
+  }
+}
