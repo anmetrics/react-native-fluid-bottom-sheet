@@ -71,6 +71,31 @@ function App() {
 | `renderClearIcon` | `() => ReactNode` | — | Custom clear icon |
 | `theme` | `BottomSheetTheme` | — | Color overrides |
 | `containerStyle` | `StyleProp<ViewStyle>` | — | Additional sheet styles |
+| `keyboardBehavior` | `'padding' \| 'height' \| 'none'` | `'padding'` | How the sheet reacts to keyboard. `padding` shifts sheet up, `height` grows sheet, `none` ignores keyboard |
+| `enableHaptics` | `boolean` | `false` | Haptic feedback on snap |
+| `onSnap` | `(index: number) => void` | — | Called when sheet snaps to a point |
+| `onAnimate` | `(from, to) => void` | — | Called when animation completes |
+| `accessibilityLabel` | `string` | — | Accessibility label for the sheet |
+| `closeButtonAccessibilityLabel` | `string` | `'Close bottom sheet'` | Accessibility label for close button |
+
+### Ref Methods
+
+```tsx
+const sheetRef = useRef<BottomSheetRef>(null)
+
+sheetRef.current?.expand()     // expand to max snap point
+sheetRef.current?.collapse()   // collapse to min snap point
+sheetRef.current?.close()      // close the sheet
+sheetRef.current?.snapTo(1)    // snap to specific index
+```
+
+### Keyboard Handling
+
+The sheet listens to keyboard events and smoothly animates to avoid the keyboard. No special Android configuration required — works with any `softwareKeyboardLayoutMode`.
+
+- `'padding'` (default): shifts the sheet up by keyboard height
+- `'height'`: grows the sheet taller to accommodate the keyboard
+- `'none'`: ignores the keyboard
 
 ### Theme
 

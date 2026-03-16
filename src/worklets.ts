@@ -30,3 +30,17 @@ export function findTargetSnap(
 
   return nearest
 }
+
+export function computeSnapPositions(
+  sortedSnaps: readonly number[],
+  maxHeight: number,
+  screenHeight: number
+): number[] {
+  'worklet'
+  const result: number[] = []
+  for (let i = 0; i < sortedSnaps.length; i++) {
+    result.push(maxHeight - screenHeight * sortedSnaps[i])
+  }
+  result.sort((a: number, b: number) => a - b)
+  return result
+}

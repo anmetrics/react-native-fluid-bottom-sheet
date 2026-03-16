@@ -1,10 +1,12 @@
 import React, {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   useImperativeHandle,
   forwardRef,
+  memo,
 } from 'react'
 import {
   StyleSheet,
@@ -14,18 +16,24 @@ import {
   Text,
   Image,
   FlatList,
+  Keyboard,
+  Platform,
 } from 'react-native'
 import Animated, {
   useSharedValue,
   useAnimatedStyle,
   useAnimatedRef,
   useAnimatedScrollHandler,
+  useAnimatedReaction,
   interpolate,
   Extrapolation,
   scrollTo,
   withSpring,
+  withTiming,
   runOnJS,
-  useAnimatedKeyboard,
+  measure,
+  Easing,
+  type SharedValue,
 } from 'react-native-reanimated'
 import { Gesture, GestureDetector } from 'react-native-gesture-handler'
 
@@ -34,12 +42,11 @@ import type { BottomSheetScrollContext } from './context'
 import { BottomSheetScrollCtx } from './context'
 import { SearchBar } from './SearchBar'
 import { SCREEN_HEIGHT, SNAP_SPRING, DEFAULT_THEME } from './constants'
-import { rubberBand, findTargetSnap } from './worklets'
+import { rubberBand, findTargetSnap, computeSnapPositions } from './worklets'
 
 /** Optional haptic feedback helper */
 const triggerHaptic = () => {
   try {
-    // Try to use react-native-haptic-feedback if available
     const Haptic = require('react-native-haptic-feedback').default
     Haptic.trigger('impactLight', {
       enableVibrateFallback: false,
@@ -47,7 +54,6 @@ const triggerHaptic = () => {
     })
   } catch {
     try {
-      // Try to use expo-haptics if available
       const ExpoHaptics = require('expo-haptics')
       if (ExpoHaptics.impactAsync) {
         ExpoHaptics.impactAsync(ExpoHaptics.ImpactFeedbackStyle.Light)
@@ -58,14 +64,166 @@ const triggerHaptic = () => {
   }
 }
 
-function useBottomInset(): number {
+function useSafeInsets(): { top: number; bottom: number } {
   try {
     const { useSafeAreaInsets } = require('react-native-safe-area-context')
-    return useSafeAreaInsets().bottom
+    const insets = useSafeAreaInsets()
+    return { top: insets.top, bottom: insets.bottom }
   } catch {
-    return 0
+    return { top: 0, bottom: 0 }
   }
 }
+
+// ─── Sub-components (isolate re-renders) ─────────────────────────
+
+interface BackdropProps {
+  translateY: SharedValue<number>
+  maxHeight: SharedValue<number>
+  color: string
+  onPress: () => void
+}
+
+const BottomSheetBackdrop = memo(function BottomSheetBackdrop({
+  translateY,
+  maxHeight,
+  color,
+  onPress,
+}: BackdropProps) {
+  const style = useAnimatedStyle(() => ({
+    opacity: interpolate(
+      translateY.value,
+      [0, maxHeight.value],
+      [1, 0],
+      Extrapolation.CLAMP
+    ),
+  }))
+
+  return (
+    <Pressable style={StyleSheet.absoluteFill} onPress={onPress}>
+      <Animated.View
+        style={[styles.backdrop, { backgroundColor: color }, style]}
+      />
+    </Pressable>
+  )
+})
+
+interface HeaderProps {
+  gesture: any
+  showHandle: boolean
+  handleColor: string
+  title?: string
+  textColor: string
+  showCloseButton: boolean
+  renderCloseButton?: (onClose: () => void) => React.ReactNode
+  closeButtonAccessibilityLabel: string
+  onClose: () => void
+}
+
+const BottomSheetHeader = memo(function BottomSheetHeader({
+  gesture,
+  showHandle,
+  handleColor,
+  title,
+  textColor,
+  showCloseButton,
+  renderCloseButton,
+  closeButtonAccessibilityLabel,
+  onClose,
+}: HeaderProps) {
+  return (
+    <GestureDetector gesture={gesture}>
+      <Animated.View>
+        {showHandle && (
+          <View style={styles.handleContainer}>
+            <View
+              style={[styles.handle, { backgroundColor: handleColor }]}
+            />
+          </View>
+        )}
+
+        {(title || showCloseButton) && (
+          <View style={styles.header}>
+            <Text style={[styles.title, { color: textColor }]}>
+              {title}
+            </Text>
+
+            {showCloseButton &&
+              (renderCloseButton ? (
+                renderCloseButton(onClose)
+              ) : (
+                <TouchableOpacity
+                  onPress={onClose}
+                  accessibilityLabel={closeButtonAccessibilityLabel}
+                  accessibilityRole="button"
+                >
+                  <Image
+                    source={require('./assets/icon-close.png')}
+                    style={[styles.closeIcon, { tintColor: textColor }]}
+                  />
+                </TouchableOpacity>
+              ))}
+          </View>
+        )}
+      </Animated.View>
+    </GestureDetector>
+  )
+})
+
+interface ContentProps {
+  searchable: boolean
+  searchPlaceholder?: string
+  onSearch?: (query: string) => void
+  searchResetKey: number
+  themeProp?: BottomSheetProps['theme']
+  renderSearchIcon?: () => React.ReactNode
+  renderClearIcon?: () => React.ReactNode
+  ctxValue: BottomSheetScrollContext
+  contentRef: React.Ref<Animated.View>
+  onLayout?: (e: { nativeEvent: { layout: { height: number } } }) => void
+  children?: React.ReactNode
+}
+
+const BottomSheetContent = memo(function BottomSheetContent({
+  searchable,
+  searchPlaceholder,
+  onSearch,
+  searchResetKey,
+  themeProp,
+  renderSearchIcon,
+  renderClearIcon,
+  ctxValue,
+  contentRef,
+  onLayout,
+  children,
+}: ContentProps) {
+  return (
+    <>
+      {searchable && (
+        <SearchBar
+          searchPlaceholder={searchPlaceholder}
+          onSearch={onSearch}
+          onReset={searchResetKey}
+          theme={themeProp}
+          renderSearchIcon={renderSearchIcon}
+          renderClearIcon={renderClearIcon}
+        />
+      )}
+
+      <BottomSheetScrollCtx.Provider value={ctxValue}>
+        <Animated.View
+          ref={contentRef}
+          style={styles.content}
+          onLayout={onLayout}
+          collapsable={false}
+        >
+          {children}
+        </Animated.View>
+      </BottomSheetScrollCtx.Provider>
+    </>
+  )
+})
+
+// ─── Main component ──────────────────────────────────────────────
 
 export const BottomSheet = forwardRef<BottomSheetRef, BottomSheetProps>(
   (
@@ -76,7 +234,7 @@ export const BottomSheet = forwardRef<BottomSheetRef, BottomSheetProps>(
       children,
       containerStyle,
       snapPoints: snapPointsProp,
-      snapPoint = 0.6,
+      snapPoint: snapPointProp,
       initialSnapIndex = 0,
       searchable = false,
       searchPlaceholder,
@@ -97,87 +255,204 @@ export const BottomSheet = forwardRef<BottomSheetRef, BottomSheetProps>(
     },
     ref
   ) => {
-    const keyboard = useAnimatedKeyboard()
-    const colors = { ...DEFAULT_THEME, ...themeProp }
-    const bottomInset = useBottomInset()
+    const colors = useMemo(
+      () => ({ ...DEFAULT_THEME, ...themeProp }),
+      [themeProp]
+    )
+    const { top: topInset, bottom: bottomInset } = useSafeInsets()
+    const maxAllowedHeight = SCREEN_HEIGHT - topInset
+
+    // Keyboard handling — iOS only by default.
+    // Android adjustResize (default) already shrinks the window, so the sheet
+    // at bottom:0 moves up automatically. Applying an extra offset would
+    // double-shift the sheet and leave a gap above the keyboard.
+    // On Android, only apply if keyboardBehavior is explicitly set AND the app
+    // uses adjustNothing (user's responsibility to match).
+    const keyboardHeight = useSharedValue(0)
+    const shouldHandleKeyboard =
+      keyboardBehavior !== 'none' && Platform.OS === 'ios'
+
+    useEffect(() => {
+      if (!shouldHandleKeyboard) return
+
+      const showSub = Keyboard.addListener('keyboardWillShow', (e) => {
+        const height = Math.max(0, e.endCoordinates.height - bottomInset)
+        keyboardHeight.value = withTiming(height, {
+          duration: e.duration || 250,
+          easing: Easing.out(Easing.ease),
+        })
+      })
+      const hideSub = Keyboard.addListener('keyboardWillHide', (e) => {
+        keyboardHeight.value = withTiming(0, {
+          duration: e.duration || 250,
+          easing: Easing.in(Easing.ease),
+        })
+      })
+
+      return () => {
+        showSub.remove()
+        hideSub.remove()
+      }
+    }, [shouldHandleKeyboard, bottomInset])
 
     const [renderSheet, setRenderSheet] = useState(isVisible)
     const [searchResetKey, setSearchResetKey] = useState(0)
-    const [contentHeight, setContentHeight] = useState(SCREEN_HEIGHT * 0.6) // default fallback
 
-    const sortedSnaps = snapPointsProp
-      ? [...snapPointsProp].sort((a, b) => a - b)
-      : [snapPoint]
+    // ── Snap computation (all derived on UI thread) ──
 
-    const isDynamic = !snapPointsProp && !snapPoint
+    const snapPoint = snapPointProp ?? 0.6
+    const isDynamic = !snapPointsProp && snapPointProp === undefined
 
-    const effectiveMaxHeight = isDynamic
-      ? contentHeight
-      : SCREEN_HEIGHT * sortedSnaps[sortedSnaps.length - 1]
+    const sortedSnaps = useMemo(
+      () =>
+        snapPointsProp
+          ? [...snapPointsProp].sort((a, b) => a - b)
+          : [snapPoint],
+      [snapPointsProp, snapPoint]
+    )
 
-    const maxSheetHeight = Math.min(effectiveMaxHeight, SCREEN_HEIGHT * 0.95)
+    const staticMaxHeight = isDynamic
+      ? SCREEN_HEIGHT * 0.6
+      : Math.min(
+          SCREEN_HEIGHT * sortedSnaps[sortedSnaps.length - 1],
+          maxAllowedHeight
+        )
 
-    const snapTranslateY = sortedSnaps
-      .map((s) => maxSheetHeight - SCREEN_HEIGHT * s)
-      .sort((a, b) => a - b)
+    // Shared values — single source of truth for UI thread
+    const maxSheetHeightSV = useSharedValue(staticMaxHeight)
+    const sortedSnapsUI = useSharedValue<number[]>(sortedSnaps)
+    const snapsUI = useSharedValue<number[]>(
+      computeSnapPositions(sortedSnaps, staticMaxHeight, SCREEN_HEIGHT)
+    )
+    const dismissAtUI = useSharedValue(staticMaxHeight * 0.6)
 
-    const initialTranslateY =
-      snapTranslateY[Math.min(initialSnapIndex, snapTranslateY.length - 1)]
+    // Sync props → shared values (only when props change)
+    useEffect(() => {
+      sortedSnapsUI.value = sortedSnaps
+      if (!isDynamic) {
+        maxSheetHeightSV.value = staticMaxHeight
+      }
+    }, [sortedSnaps, staticMaxHeight, isDynamic])
 
-    const dismissThreshold = maxSheetHeight * 0.4
+    // Derive snap positions on UI thread when maxHeight changes
+    useAnimatedReaction(
+      () => maxSheetHeightSV.value,
+      (maxH) => {
+        const snaps = sortedSnapsUI.value
+        const result: number[] = []
+        for (let i = 0; i < snaps.length; i++) {
+          result.push(maxH - SCREEN_HEIGHT * snaps[i])
+        }
+        result.sort((a: number, b: number) => a - b)
+        snapsUI.value = result
+        dismissAtUI.value = maxH - maxH * 0.4
+      }
+    )
 
-    const snapsUI = useSharedValue<number[]>(snapTranslateY)
-    const dismissAtUI = useSharedValue(maxSheetHeight - dismissThreshold)
+    // ── Animation shared values ──
 
-    const translateY = useSharedValue(maxSheetHeight)
+    const translateY = useSharedValue(staticMaxHeight)
     const context = useSharedValue(0)
-
     const scrollOffset = useSharedValue(0)
     const scrollRef = useAnimatedRef<FlatList<any>>()
+    const touchStartY = useSharedValue(0)
 
-    const isSheetDragging = useSharedValue(false)
-    const dragStartY = useSharedValue(0)
+    // ── Dynamic height: measure() on UI thread ──
 
-    Animated.useDerivedValue(() => {
-      if (onAnimate) {
-        runOnJS(onAnimate)(translateY.value, maxSheetHeight)
+    const contentRef = useAnimatedRef<Animated.View>()
+    const hasMeasured = useSharedValue(false)
+
+    // Reset measurement flag when sheet closes
+    useEffect(() => {
+      if (!renderSheet) {
+        hasMeasured.value = false
       }
-    })
+    }, [renderSheet])
+
+    // Measure content on UI thread (no JS roundtrip for initial layout)
+    useAnimatedReaction(
+      () => translateY.value,
+      () => {
+        if (!isDynamic || hasMeasured.value) return
+        const m = measure(contentRef)
+        if (m && m.height > 0) {
+          hasMeasured.value = true
+          maxSheetHeightSV.value = Math.min(m.height, maxAllowedHeight)
+        }
+      }
+    )
+
+    // Fallback: onLayout → shared value for subsequent size changes (no setState)
+    const handleContentLayout = useCallback(
+      (e: { nativeEvent: { layout: { height: number } } }) => {
+        if (!isDynamic) return
+        const h = e.nativeEvent.layout.height
+        if (h > 0) {
+          maxSheetHeightSV.value = Math.min(h, maxAllowedHeight)
+        }
+      },
+      [isDynamic, maxSheetHeightSV]
+    )
+
+    // ── Callbacks ──
+
+    const notifyAnimate = useCallback(
+      (target: number) => {
+        onAnimate?.(target, maxSheetHeightSV.value)
+      },
+      [onAnimate, maxSheetHeightSV]
+    )
+
+    const handleDismissComplete = useCallback(() => {
+      keyboardHeight.value = 0
+      setRenderSheet(false)
+      onClose?.()
+    }, [onClose, keyboardHeight])
 
     const open = useCallback(() => {
       setRenderSheet(true)
-      translateY.value = withSpring(initialTranslateY, SNAP_SPRING)
-    }, [initialTranslateY, translateY])
+      const snaps = snapsUI.value
+      const target = snaps[Math.min(initialSnapIndex, snaps.length - 1)]
+      translateY.value = withSpring(target, SNAP_SPRING, (finished) => {
+        if (finished && onAnimate) runOnJS(notifyAnimate)(target)
+      })
+    }, [initialSnapIndex, translateY, notifyAnimate, onAnimate, snapsUI])
 
     const close = useCallback(() => {
-      translateY.value = withSpring(maxSheetHeight, SNAP_SPRING, (finished) => {
+      const maxH = maxSheetHeightSV.value
+      translateY.value = withSpring(maxH, SNAP_SPRING, (finished) => {
         if (finished) {
-          runOnJS(setRenderSheet)(false)
-          if (onClose) runOnJS(onClose)()
+          if (onAnimate) runOnJS(notifyAnimate)(maxH)
+          runOnJS(handleDismissComplete)()
         }
       })
-    }, [maxSheetHeight, onClose, translateY])
+    }, [translateY, maxSheetHeightSV, notifyAnimate, handleDismissComplete, onAnimate])
 
     useImperativeHandle(ref, () => ({
       expand: (index?: number) => {
+        const snaps = snapsUI.value
         const target =
           index !== undefined
-            ? snapTranslateY[Math.min(index, snapTranslateY.length - 1)]
-            : snapTranslateY[0]
-        translateY.value = withSpring(target, SNAP_SPRING)
+            ? snaps[Math.min(index, snaps.length - 1)]
+            : snaps[0]
+        translateY.value = withSpring(target, SNAP_SPRING, (finished) => {
+          if (finished && onAnimate) runOnJS(notifyAnimate)(target)
+        })
       },
       collapse: () => {
-        translateY.value = withSpring(
-          snapTranslateY[snapTranslateY.length - 1],
-          SNAP_SPRING
-        )
+        const snaps = snapsUI.value
+        const target = snaps[snaps.length - 1]
+        translateY.value = withSpring(target, SNAP_SPRING, (finished) => {
+          if (finished && onAnimate) runOnJS(notifyAnimate)(target)
+        })
       },
-      close: () => {
-        close()
-      },
+      close: () => close(),
       snapTo: (index: number) => {
-        const target = snapTranslateY[Math.min(index, snapTranslateY.length - 1)]
-        translateY.value = withSpring(target, SNAP_SPRING)
+        const snaps = snapsUI.value
+        const target = snaps[Math.min(index, snaps.length - 1)]
+        translateY.value = withSpring(target, SNAP_SPRING, (finished) => {
+          if (finished && onAnimate) runOnJS(notifyAnimate)(target)
+        })
       },
     }))
 
@@ -189,7 +464,10 @@ export const BottomSheet = forwardRef<BottomSheetRef, BottomSheetProps>(
       } else if (renderSheet) {
         close()
       }
-    }, [isVisible, renderSheet, open, close, onSearch])
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [isVisible, open, close, onSearch])
+
+    // ── Gestures ──
 
     const scrollHandler = useAnimatedScrollHandler({
       onScroll: (event) => {
@@ -197,6 +475,7 @@ export const BottomSheet = forwardRef<BottomSheetRef, BottomSheetProps>(
       },
     })
 
+    // Header gesture — always draggable
     const headerGesture = Gesture.Pan()
       .activeOffsetY([-4, 4])
       .onStart(() => {
@@ -206,14 +485,16 @@ export const BottomSheet = forwardRef<BottomSheetRef, BottomSheetProps>(
         let newY = context.value + e.translationY
 
         if (newY < 0) {
-          newY = -rubberBand(-newY, maxSheetHeight * 0.25)
+          newY = -rubberBand(-newY, maxSheetHeightSV.value * 0.25)
         }
 
         translateY.value = newY
       })
       .onEnd((e) => {
         if (translateY.value < 0) {
-          translateY.value = withSpring(0, SNAP_SPRING)
+          translateY.value = withSpring(0, SNAP_SPRING, (finished) => {
+            if (finished && onAnimate) runOnJS(notifyAnimate)(0)
+          })
           return
         }
 
@@ -225,48 +506,59 @@ export const BottomSheet = forwardRef<BottomSheetRef, BottomSheetProps>(
         )
 
         if (target >= dismissAtUI.value) {
-          runOnJS(close)()
+          translateY.value = withSpring(
+            maxSheetHeightSV.value,
+            SNAP_SPRING,
+            (finished) => {
+              if (finished) {
+                if (onAnimate)
+                  runOnJS(notifyAnimate)(maxSheetHeightSV.value)
+                runOnJS(handleDismissComplete)()
+              }
+            }
+          )
         } else {
+          translateY.value = withSpring(target, SNAP_SPRING, (finished) => {
+            if (finished && onAnimate) runOnJS(notifyAnimate)(target)
+          })
           const index = snapsUI.value.indexOf(target)
           if (onSnap) runOnJS(onSnap)(index)
           if (enableHaptics) runOnJS(triggerHaptic)()
-          translateY.value = withSpring(target, SNAP_SPRING)
         }
       })
 
+    // Content gesture — manualActivation: only activate at scroll top + pull down
     const contentPanGesture = Gesture.Pan()
-      .activeOffsetY([-4, 4])
+      .manualActivation(true)
+      .onTouchesDown((e, _stateManager) => {
+        if (e.numberOfTouches === 1) {
+          touchStartY.value = e.allTouches[0].y
+        }
+      })
+      .onTouchesMove((e, stateManager) => {
+        if (e.numberOfTouches !== 1) {
+          stateManager.fail()
+          return
+        }
+
+        const dy = e.allTouches[0].y - touchStartY.value
+
+        if (scrollOffset.value <= 1 && dy > 8) {
+          // At scroll top + pulling down → activate sheet drag
+          stateManager.activate()
+        } else if (dy < -8) {
+          // Pulling up → let scroll handle exclusively
+          stateManager.fail()
+        }
+      })
       .onStart(() => {
-        isSheetDragging.value = false
         context.value = translateY.value
+        scrollTo(scrollRef, 0, 0, false)
       })
       .onUpdate((e) => {
-        const atTop = scrollOffset.value <= 1
-        const pullingDown = e.translationY > 0
-
-        if (!isSheetDragging.value && atTop && pullingDown) {
-          isSheetDragging.value = true
-          dragStartY.value = e.absoluteY
-          context.value = translateY.value
-
-          scrollTo(scrollRef, 0, 0, false)
-        }
-
-        if (isSheetDragging.value) {
-          const delta = e.absoluteY - dragStartY.value
-
-          if (delta < -8) {
-            translateY.value = context.value
-            isSheetDragging.value = false
-            return
-          }
-
-          translateY.value = context.value + Math.max(0, delta)
-        }
+        translateY.value = context.value + Math.max(0, e.translationY)
       })
-      .onEnd((e: any) => {
-        if (!isSheetDragging.value) return
-
+      .onEnd((e) => {
         const target = findTargetSnap(
           translateY.value,
           e.velocityY,
@@ -275,15 +567,25 @@ export const BottomSheet = forwardRef<BottomSheetRef, BottomSheetProps>(
         )
 
         if (target >= dismissAtUI.value) {
-          runOnJS(close)()
+          translateY.value = withSpring(
+            maxSheetHeightSV.value,
+            SNAP_SPRING,
+            (finished) => {
+              if (finished) {
+                if (onAnimate)
+                  runOnJS(notifyAnimate)(maxSheetHeightSV.value)
+                runOnJS(handleDismissComplete)()
+              }
+            }
+          )
         } else {
+          translateY.value = withSpring(target, SNAP_SPRING, (finished) => {
+            if (finished && onAnimate) runOnJS(notifyAnimate)(target)
+          })
           const index = snapsUI.value.indexOf(target)
           if (onSnap) runOnJS(onSnap)(index)
           if (enableHaptics) runOnJS(triggerHaptic)()
-          translateY.value = withSpring(target, SNAP_SPRING)
         }
-
-        isSheetDragging.value = false
       })
 
     const nativeScrollGesture = Gesture.Native()
@@ -291,6 +593,8 @@ export const BottomSheet = forwardRef<BottomSheetRef, BottomSheetProps>(
       contentPanGesture,
       nativeScrollGesture
     )
+
+    // ── Scroll context ──
 
     const ctxRef = useRef<BottomSheetScrollContext | null>(null)
 
@@ -305,43 +609,47 @@ export const BottomSheet = forwardRef<BottomSheetRef, BottomSheetProps>(
     ctxRef.current.scrollHandler = scrollHandler
     ctxRef.current.contentGesture = contentGesture
 
-    const sheetStyle = useAnimatedStyle(() => {
-      const keyboardOffset =
-        keyboardBehavior === 'padding' ? keyboard.height.value : 0
+    // ── Animated styles ──
 
+    const sheetStyle = useAnimatedStyle(() => {
+      const kbH = keyboardHeight.value
+
+      if (keyboardBehavior === 'height') {
+        return {
+          height: maxSheetHeightSV.value + kbH,
+          transform: [{ translateY: translateY.value }],
+        }
+      }
+
+      if (keyboardBehavior === 'padding') {
+        return {
+          height: maxSheetHeightSV.value,
+          transform: [{ translateY: translateY.value - kbH }],
+        }
+      }
+
+      // 'none'
       return {
-        transform: [{ translateY: translateY.value - keyboardOffset }],
+        height: maxSheetHeightSV.value,
+        transform: [{ translateY: translateY.value }],
       }
     })
-
-    const backdropStyle = useAnimatedStyle(() => ({
-      opacity: interpolate(
-        translateY.value,
-        [0, maxSheetHeight],
-        [1, 0],
-        Extrapolation.CLAMP
-      ),
-    }))
 
     if (!renderSheet && !isVisible) return null
 
     return (
       <View style={StyleSheet.absoluteFill}>
-        <Pressable style={StyleSheet.absoluteFill} onPress={close}>
-          <Animated.View
-            style={[
-              styles.backdrop,
-              { backgroundColor: colors.backdropColor },
-              backdropStyle,
-            ]}
-          />
-        </Pressable>
+        <BottomSheetBackdrop
+          translateY={translateY}
+          maxHeight={maxSheetHeightSV}
+          color={colors.backdropColor}
+          onPress={close}
+        />
 
         <Animated.View
           style={[
             styles.sheet,
             {
-              height: maxSheetHeight,
               backgroundColor: colors.backgroundColor,
               paddingBottom: bottomInset,
             },
@@ -351,75 +659,32 @@ export const BottomSheet = forwardRef<BottomSheetRef, BottomSheetProps>(
           accessibilityLabel={accessibilityLabel}
           accessibilityRole={accessibilityRole as any}
         >
-          <GestureDetector gesture={headerGesture}>
-            <Animated.View>
-              {showHandle && (
-                <View style={styles.handleContainer}>
-                  <View
-                    style={[
-                      styles.handle,
-                      { backgroundColor: colors.handleColor },
-                    ]}
-                  />
-                </View>
-              )}
+          <BottomSheetHeader
+            gesture={headerGesture}
+            showHandle={showHandle}
+            handleColor={colors.handleColor}
+            title={title}
+            textColor={colors.textColor}
+            showCloseButton={showCloseButton}
+            renderCloseButton={renderCloseButton}
+            closeButtonAccessibilityLabel={closeButtonAccessibilityLabel}
+            onClose={close}
+          />
 
-              {(title || showCloseButton) && (
-                <View style={styles.header}>
-                  <Text style={[styles.title, { color: colors.textColor }]}>
-                    {title}
-                  </Text>
-
-                  {showCloseButton &&
-                    (renderCloseButton ? (
-                      renderCloseButton(close)
-                    ) : (
-                      <TouchableOpacity
-                        onPress={close}
-                        accessibilityLabel={closeButtonAccessibilityLabel}
-                        accessibilityRole="button"
-                      >
-                        <Image
-                          source={require('./assets/icon-close.png')}
-                          style={{
-                            width: 24,
-                            height: 24,
-                            tintColor: colors.textColor,
-                          }}
-                        />
-                      </TouchableOpacity>
-                    ))}
-                </View>
-              )}
-            </Animated.View>
-          </GestureDetector>
-
-          {searchable && (
-            <SearchBar
-              searchPlaceholder={searchPlaceholder}
-              onSearch={onSearch}
-              onReset={searchResetKey}
-              theme={themeProp}
-              renderSearchIcon={renderSearchIcon}
-              renderClearIcon={renderClearIcon}
-            />
-          )}
-
-          <BottomSheetScrollCtx.Provider value={ctxRef.current}>
-            <View
-              style={styles.content}
-              onLayout={(e) => {
-                if (!snapPointsProp) {
-                  const h = e.nativeEvent.layout.height
-                  if (h > 0 && Math.abs(h - contentHeight) > 1) {
-                    setContentHeight(h)
-                  }
-                }
-              }}
-            >
-              {children}
-            </View>
-          </BottomSheetScrollCtx.Provider>
+          <BottomSheetContent
+            searchable={searchable}
+            searchPlaceholder={searchPlaceholder}
+            onSearch={onSearch}
+            searchResetKey={searchResetKey}
+            themeProp={themeProp}
+            renderSearchIcon={renderSearchIcon}
+            renderClearIcon={renderClearIcon}
+            ctxValue={ctxRef.current}
+            contentRef={contentRef}
+            onLayout={isDynamic ? handleContentLayout : undefined}
+          >
+            {children}
+          </BottomSheetContent>
         </Animated.View>
       </View>
     )
@@ -460,5 +725,9 @@ const styles = StyleSheet.create({
   },
   content: {
     flex: 1,
+  },
+  closeIcon: {
+    width: 24,
+    height: 24,
   },
 })
