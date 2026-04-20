@@ -64,6 +64,13 @@ export interface BottomSheetProps {
   /** Keyboard avoidance behavior. Default: 'padding' */
   keyboardBehavior?: 'padding' | 'height' | 'none'
 
+  /**
+   * Minimum top Y the sheet can reach when shifted up by the keyboard.
+   * Use this to prevent the sheet from overlapping a custom header above it.
+   * Defaults to max(useSafeAreaInsets().top, StatusBar.currentHeight).
+   */
+  topInset?: number
+
   // --- Callbacks ---
   onSnap?: (index: number) => void
   onAnimate?: (fromValue: number, toValue: number) => void

@@ -16,8 +16,9 @@ import {
   Text,
   Image,
   FlatList,
-  Keyboard,
   Platform,
+  Dimensions,
+  StatusBar,
 } from 'react-native'
 import Animated, {
   useSharedValue,
@@ -25,23 +26,26 @@ import Animated, {
   useAnimatedRef,
   useAnimatedScrollHandler,
   useAnimatedReaction,
+  useAnimatedKeyboard,
   interpolate,
   Extrapolation,
   scrollTo,
   withSpring,
-  withTiming,
   runOnJS,
   measure,
-  Easing,
   type SharedValue,
 } from 'react-native-reanimated'
 import { Gesture, GestureDetector } from 'react-native-gesture-handler'
+import {
+  useSafeAreaInsets,
+  initialWindowMetrics,
+} from 'react-native-safe-area-context'
 
 import type { BottomSheetProps, BottomSheetRef } from './types'
 import type { BottomSheetScrollContext } from './context'
 import { BottomSheetScrollCtx } from './context'
 import { SearchBar } from './SearchBar'
-import { SCREEN_HEIGHT, SNAP_SPRING, DEFAULT_THEME } from './constants'
+import { SNAP_SPRING, DEFAULT_THEME } from './constants'
 import { rubberBand, findTargetSnap, computeSnapPositions } from './worklets'
 
 /** Optional haptic feedback helper */
@@ -64,15 +68,6 @@ const triggerHaptic = () => {
   }
 }
 
-function useSafeInsets(): { top: number; bottom: number } {
-  try {
-    const { useSafeAreaInsets } = require('react-native-safe-area-context')
-    const insets = useSafeAreaInsets()
-    return { top: insets.top, bottom: insets.bottom }
-  } catch {
-    return { top: 0, bottom: 0 }
-  }
-}
 
 // ─── Sub-components (isolate re-renders) ─────────────────────────
 
@@ -251,7 +246,12 @@ export const BottomSheet = forwardRef<BottomSheetRef, BottomSheetProps>(
       closeButtonAccessibilityLabel = 'Close bottom sheet',
       onSnap,
       onAnimate,
+      // Default 'padding': shift the sheet up so its bottom sits on the
+      // keyboard. Cross-platform safe — if the host window already shrinks
+      // (Android softInputMode='adjustResize'), the shift accounts for that
+      // and only fills the remaining gap.
       keyboardBehavior = 'padding',
+      topInset: topInsetProp,
     },
     ref
   ) => {
@@ -259,41 +259,96 @@ export const BottomSheet = forwardRef<BottomSheetRef, BottomSheetProps>(
       () => ({ ...DEFAULT_THEME, ...themeProp }),
       [themeProp]
     )
-    const { top: topInset, bottom: bottomInset } = useSafeInsets()
-    const maxAllowedHeight = SCREEN_HEIGHT - topInset
+    const hookInsets = useSafeAreaInsets()
+    // The hook returns 0 on the first render when the consumer forgot to
+    // pass `initialMetrics` to SafeAreaProvider. `initialWindowMetrics` is
+    // populated synchronously at module load via the native bridge, so it
+    // works as a fallback regardless of consumer setup.
+    const safeAreaTop =
+      hookInsets.top || initialWindowMetrics?.insets.top || 0
+    const bottomInset =
+      hookInsets.bottom || initialWindowMetrics?.insets.bottom || 0
 
-    // Keyboard handling — iOS only by default.
-    // Android adjustResize (default) already shrinks the window, so the sheet
-    // at bottom:0 moves up automatically. Applying an extra offset would
-    // double-shift the sheet and leave a gap above the keyboard.
-    // On Android, only apply if keyboardBehavior is explicitly set AND the app
-    // uses adjustNothing (user's responsibility to match).
-    const keyboardHeight = useSharedValue(0)
-    const shouldHandleKeyboard =
-      keyboardBehavior !== 'none' && Platform.OS === 'ios'
+    // Effective top inset — the minimum Y the sheet's top can reach.
+    // Take the max of every OS-native signal we can read; whichever reports
+    // the real protected region wins:
+    //   • iOS: hook (covers notch / dynamic island / status bar).
+    //   • Android: `StatusBar.currentHeight` reads the `status_bar_height`
+    //     resource directly and is always available. On edge-to-edge it
+    //     equals the real inset; on non-edge-to-edge the window is already
+    //     below the status bar so we overshoot by ~status-bar-height of
+    //     padding — benign, and avoids the failure mode where an
+    //     edge-to-edge detection heuristic goes wrong and leaves the sheet
+    //     exposed under the status bar.
+    const topInset =
+      topInsetProp ??
+      Math.max(
+        safeAreaTop,
+        Platform.OS === 'android' ? StatusBar.currentHeight ?? 0 : 0
+      )
+
+    // Dynamic screen height — updates on rotation / layout changes. Worklets
+    // read from screenHeightSV so they always see fresh values. Same for insets.
+    // Keyboard-induced window shrinks on Android (softInputMode='resize') are
+    // filtered out of screenHeight: only height changes while width stays —
+    // ignoring these prevents the sheet from resizing every time the keyboard
+    // toggles. `realWindowHeightSV` always tracks the actual (possibly shrunk)
+    // window, which is what the sheet's absolute parent is laid out against.
+    const [screenHeight, setScreenHeight] = useState(
+      () => Dimensions.get('window').height
+    )
+    const screenHeightSV = useSharedValue(Dimensions.get('window').height)
+    const realWindowHeightSV = useSharedValue(
+      Dimensions.get('window').height
+    )
+    // Measured height of the sheet's actual parent container. May be smaller
+    // than the window (e.g., when the sheet lives inside a screen nested in
+    // a bottom-tab navigator — the tab bar consumes space below). Used to
+    // stop the sheet from rendering under sibling UI like tab bars.
+    const parentHeightSV = useSharedValue(Dimensions.get('window').height)
+    const topInsetSV = useSharedValue(topInset)
+    const bottomInsetSV = useSharedValue(bottomInset)
+
+    const handleParentLayout = useCallback(
+      (e: { nativeEvent: { layout: { height: number } } }) => {
+        const h = e.nativeEvent.layout.height
+        if (h > 0) parentHeightSV.value = h
+      },
+      [parentHeightSV]
+    )
 
     useEffect(() => {
-      if (!shouldHandleKeyboard) return
-
-      const showSub = Keyboard.addListener('keyboardWillShow', (e) => {
-        const height = Math.max(0, e.endCoordinates.height - bottomInset)
-        keyboardHeight.value = withTiming(height, {
-          duration: e.duration || 250,
-          easing: Easing.out(Easing.ease),
-        })
+      let prev = Dimensions.get('window')
+      const sub = Dimensions.addEventListener('change', ({ window }) => {
+        realWindowHeightSV.value = window.height
+        const keyboardShrink =
+          prev.width === window.width && window.height < prev.height
+        prev = window
+        if (keyboardShrink) return
+        setScreenHeight(window.height)
+        screenHeightSV.value = window.height
       })
-      const hideSub = Keyboard.addListener('keyboardWillHide', (e) => {
-        keyboardHeight.value = withTiming(0, {
-          duration: e.duration || 250,
-          easing: Easing.in(Easing.ease),
-        })
-      })
+      return () => sub.remove()
+    }, [screenHeightSV, realWindowHeightSV])
 
-      return () => {
-        showSub.remove()
-        hideSub.remove()
-      }
-    }, [shouldHandleKeyboard, bottomInset])
+    useEffect(() => {
+      topInsetSV.value = topInset
+      bottomInsetSV.value = bottomInset
+    }, [topInset, bottomInset, topInsetSV, bottomInsetSV])
+
+    const maxAllowedHeight = screenHeight - topInset
+
+    // Keyboard handling — driven by reanimated's `useAnimatedKeyboard`.
+    // Both `*TranslucentAndroid` flags must be true for edge-to-edge apps
+    // (Android 15+ default). Without them the hook bakes the nav bar height
+    // into the reported keyboard height, leaving a phantom gap below the
+    // sheet. The flags are no-ops on iOS and on non-edge-to-edge Android, so
+    // they're safe to enable unconditionally.
+    const animatedKeyboard = useAnimatedKeyboard({
+      isStatusBarTranslucentAndroid: true,
+      isNavigationBarTranslucentAndroid: true,
+    })
+    const keyboardHeight = animatedKeyboard.height
 
     const [renderSheet, setRenderSheet] = useState(isVisible)
     const [searchResetKey, setSearchResetKey] = useState(0)
@@ -312,9 +367,9 @@ export const BottomSheet = forwardRef<BottomSheetRef, BottomSheetProps>(
     )
 
     const staticMaxHeight = isDynamic
-      ? SCREEN_HEIGHT * 0.6
+      ? screenHeight * 0.6
       : Math.min(
-          SCREEN_HEIGHT * sortedSnaps[sortedSnaps.length - 1],
+          screenHeight * sortedSnaps[sortedSnaps.length - 1],
           maxAllowedHeight
         )
 
@@ -322,7 +377,7 @@ export const BottomSheet = forwardRef<BottomSheetRef, BottomSheetProps>(
     const maxSheetHeightSV = useSharedValue(staticMaxHeight)
     const sortedSnapsUI = useSharedValue<number[]>(sortedSnaps)
     const snapsUI = useSharedValue<number[]>(
-      computeSnapPositions(sortedSnaps, staticMaxHeight, SCREEN_HEIGHT)
+      computeSnapPositions(sortedSnaps, staticMaxHeight, screenHeight)
     )
     const dismissAtUI = useSharedValue(staticMaxHeight * 0.6)
 
@@ -334,14 +389,14 @@ export const BottomSheet = forwardRef<BottomSheetRef, BottomSheetProps>(
       }
     }, [sortedSnaps, staticMaxHeight, isDynamic])
 
-    // Derive snap positions on UI thread when maxHeight changes
+    // Derive snap positions on UI thread when maxHeight or screenHeight changes
     useAnimatedReaction(
-      () => maxSheetHeightSV.value,
-      (maxH) => {
+      () => ({ maxH: maxSheetHeightSV.value, sh: screenHeightSV.value }),
+      ({ maxH, sh }) => {
         const snaps = sortedSnapsUI.value
         const result: number[] = []
         for (let i = 0; i < snaps.length; i++) {
-          result.push(maxH - SCREEN_HEIGHT * snaps[i])
+          result.push(maxH - sh * snaps[i])
         }
         result.sort((a: number, b: number) => a - b)
         snapsUI.value = result
@@ -404,10 +459,9 @@ export const BottomSheet = forwardRef<BottomSheetRef, BottomSheetProps>(
     )
 
     const handleDismissComplete = useCallback(() => {
-      keyboardHeight.value = 0
       setRenderSheet(false)
       onClose?.()
-    }, [onClose, keyboardHeight])
+    }, [onClose])
 
     const open = useCallback(() => {
       setRenderSheet(true)
@@ -613,32 +667,65 @@ export const BottomSheet = forwardRef<BottomSheetRef, BottomSheetProps>(
 
     const sheetStyle = useAnimatedStyle(() => {
       const kbH = keyboardHeight.value
+      const maxH = maxSheetHeightSV.value
+      const sh = screenHeightSV.value
+      const shReal = realWindowHeightSV.value
+      const parentH = parentHeightSV.value
+      const top = topInsetSV.value
+      const bot = bottomInsetSV.value
 
-      if (keyboardBehavior === 'height') {
-        return {
-          height: maxSheetHeightSV.value + kbH,
-          transform: [{ translateY: translateY.value }],
-        }
-      }
+      // Where the sheet's bottom should sit (in parent coords). Two
+      // independent constraints — use whichever is tighter:
+      //   • Keyboard: sheet bottom must not exceed the keyboard top.
+      //     We need a total upward shift of `kbH` from the unshrunk window
+      //     bottom. The OS may have already done part of that shift by
+      //     shrinking the window itself (Android non-edge-to-edge with
+      //     adjustResize); only apply the remainder. `max(0, …)` covers the
+      //     rare case where the OS over-shrinks (windowShrink > kbH).
+      //   • Parent bottom: sheet bottom must not exceed the parent's own
+      //     bottom — this keeps the sheet above sibling UI like bottom
+      //     tabs when the keyboard is hidden.
+      const windowShrink = Math.max(0, sh - shReal)
+      const effectiveShift =
+        kbH > 0 && keyboardBehavior === 'padding'
+          ? Math.max(0, kbH - windowShrink)
+          : 0
+      const anchorBottom = Math.min(shReal - effectiveShift, parentH)
+      // On rubber-band overdrag up (translateY < 0), keep the bottom anchored
+      // to the parent edge so the sheet grows taller instead of sliding up
+      // and exposing the backdrop below it. Top still follows translateY.
+      const desiredBottom =
+        translateY.value < 0 ? anchorBottom : anchorBottom + translateY.value
 
-      if (keyboardBehavior === 'padding') {
-        return {
-          height: maxSheetHeightSV.value,
-          transform: [{ translateY: translateY.value - kbH }],
-        }
-      }
+      // 'height' mode grows the sheet under the keyboard.
+      const baseHeight =
+        kbH > 0 && keyboardBehavior === 'height' ? maxH + kbH : maxH
 
-      // 'none'
+      // Clamp top to safe area and shrink height to fit — the ScrollView
+      // inside absorbs the reduced space.
+      const naturalTop = anchorBottom + translateY.value - baseHeight
+      const sheetTop = naturalTop < top ? top : naturalTop
+      const height = Math.max(0, desiredBottom - sheetTop)
+
+      const paddingBottom = kbH > 0 && keyboardBehavior !== 'none' ? 0 : bot
+
+      // Directly set `top` and `height` — no `bottom:0 + transform` trick.
+      // Keeps layout semantics unambiguous: `top` is literally the sheet's
+      // top edge in parent coords. Rendered top === sheetTop ≥ topInset.
       return {
-        height: maxSheetHeightSV.value,
-        transform: [{ translateY: translateY.value }],
+        top: sheetTop,
+        height,
+        paddingBottom,
       }
     })
 
     if (!renderSheet && !isVisible) return null
 
     return (
-      <View style={StyleSheet.absoluteFill}>
+      <View
+        style={StyleSheet.absoluteFill}
+        onLayout={handleParentLayout}
+      >
         <BottomSheetBackdrop
           translateY={translateY}
           maxHeight={maxSheetHeightSV}
@@ -651,7 +738,6 @@ export const BottomSheet = forwardRef<BottomSheetRef, BottomSheetProps>(
             styles.sheet,
             {
               backgroundColor: colors.backgroundColor,
-              paddingBottom: bottomInset,
             },
             containerStyle,
             sheetStyle,
@@ -697,7 +783,6 @@ const styles = StyleSheet.create({
   },
   sheet: {
     position: 'absolute',
-    bottom: 0,
     left: 0,
     right: 0,
     borderTopLeftRadius: 20,
