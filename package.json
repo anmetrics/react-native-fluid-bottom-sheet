@@ -1,6 +1,6 @@
 {
   "name": "react-native-fluid-bottom-sheet",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "A performant, gesture-driven bottom sheet for React Native with snap points, search bar, and FlatList support.",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
