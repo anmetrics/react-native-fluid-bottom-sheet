@@ -19,6 +19,8 @@ import {
   Platform,
   Dimensions,
   StatusBar,
+  Keyboard,
+  type KeyboardEvent,
 } from 'react-native'
 import Animated, {
   useSharedValue,
@@ -26,13 +28,13 @@ import Animated, {
   useAnimatedRef,
   useAnimatedScrollHandler,
   useAnimatedReaction,
-  useAnimatedKeyboard,
   interpolate,
   Extrapolation,
   scrollTo,
   withSpring,
+  withTiming,
+  Easing,
   runOnJS,
-  measure,
   type SharedValue,
 } from 'react-native-reanimated'
 import { Gesture, GestureDetector } from 'react-native-gesture-handler'
@@ -40,10 +42,11 @@ import {
   useSafeAreaInsets,
   initialWindowMetrics,
 } from 'react-native-safe-area-context'
+import { useKeyboardHandler } from 'react-native-keyboard-controller'
 
 import type { BottomSheetProps, BottomSheetRef } from './types'
 import type { BottomSheetScrollContext } from './context'
-import { BottomSheetScrollCtx } from './context'
+import { BottomSheetScrollCtx, BottomSheetDynamicSizingCtx } from './context'
 import { SearchBar } from './SearchBar'
 import { SNAP_SPRING, DEFAULT_THEME } from './constants'
 import { rubberBand, findTargetSnap, computeSnapPositions } from './worklets'
@@ -173,6 +176,7 @@ interface ContentProps {
   renderSearchIcon?: () => React.ReactNode
   renderClearIcon?: () => React.ReactNode
   ctxValue: BottomSheetScrollContext
+  bottomPadding: number
   children?: React.ReactNode
 }
 
@@ -185,6 +189,7 @@ const BottomSheetContent = memo(function BottomSheetContent({
   renderSearchIcon,
   renderClearIcon,
   ctxValue,
+  bottomPadding,
   children,
 }: ContentProps) {
   return (
@@ -201,7 +206,10 @@ const BottomSheetContent = memo(function BottomSheetContent({
       )}
 
       <BottomSheetScrollCtx.Provider value={ctxValue}>
-        <Animated.View style={styles.content} collapsable={false}>
+        <Animated.View
+          style={[styles.content, { paddingBottom: bottomPadding }]}
+          collapsable={false}
+        >
           {children}
         </Animated.View>
       </BottomSheetScrollCtx.Provider>
@@ -243,6 +251,9 @@ export const BottomSheet = forwardRef<BottomSheetRef, BottomSheetProps>(
       // and only fills the remaining gap.
       keyboardBehavior = 'padding',
       topInset: topInsetProp,
+      enableDynamicSizing = false,
+      minDynamicSnapFraction = 0.3,
+      maxDynamicSnapFraction = 0.9,
     },
     ref
   ) => {
@@ -257,8 +268,15 @@ export const BottomSheet = forwardRef<BottomSheetRef, BottomSheetProps>(
     // works as a fallback regardless of consumer setup.
     const safeAreaTop =
       hookInsets.top || initialWindowMetrics?.insets.top || 0
-    const bottomInset =
-      hookInsets.bottom || initialWindowMetrics?.insets.bottom || 0
+    // `bottomInset` is read from the *static* `initialWindowMetrics`, NOT
+    // the reactive `useSafeAreaInsets()` hook. On some Android edge-to-edge
+    // configurations the hook's `bottom` value ticks up while the IME
+    // animates open — that would re-render the component, recompute
+    // `maxAllowedHeight`/`staticMaxHeight`, and the sheet's max height
+    // would jump frame-by-frame to follow it. Static inset = stable
+    // calculation = sheet height changes are driven only by the keyboard
+    // animation (kbH) and not by `useSafeAreaInsets` jitter.
+    const bottomInset = initialWindowMetrics?.insets.bottom ?? 0
 
     // Effective top inset — the minimum Y the sheet's top can reach.
     // Take the max of every OS-native signal we can read; whichever reports
@@ -278,40 +296,22 @@ export const BottomSheet = forwardRef<BottomSheetRef, BottomSheetProps>(
         Platform.OS === 'android' ? StatusBar.currentHeight ?? 0 : 0
       )
 
-    // Dynamic screen height — updates on rotation / layout changes. Worklets
-    // read from screenHeightSV so they always see fresh values. Same for insets.
-    // Keyboard-induced window shrinks on Android (softInputMode='resize') are
-    // filtered out of screenHeight: only height changes while width stays —
-    // ignoring these prevents the sheet from resizing every time the keyboard
-    // toggles. `realWindowHeightSV` always tracks the actual (possibly shrunk)
-    // window, which is what the sheet's absolute parent is laid out against.
+    // Screen height — captured once and updated only on real window-size
+    // changes (rotation). Keyboard-induced window shrinks on Android
+    // `softInputMode=adjustResize` are filtered out: a height-only
+    // decrease while width stays the same is presumed to be the keyboard,
+    // and we don't want the sheet to resize every time the keyboard
+    // toggles.
     const [screenHeight, setScreenHeight] = useState(
       () => Dimensions.get('window').height
     )
     const screenHeightSV = useSharedValue(Dimensions.get('window').height)
-    const realWindowHeightSV = useSharedValue(
-      Dimensions.get('window').height
-    )
-    // Measured height of the sheet's actual parent container. May be smaller
-    // than the window (e.g., when the sheet lives inside a screen nested in
-    // a bottom-tab navigator — the tab bar consumes space below). Used to
-    // stop the sheet from rendering under sibling UI like tab bars.
-    const parentHeightSV = useSharedValue(Dimensions.get('window').height)
     const topInsetSV = useSharedValue(topInset)
     const bottomInsetSV = useSharedValue(bottomInset)
-
-    const handleParentLayout = useCallback(
-      (e: { nativeEvent: { layout: { height: number } } }) => {
-        const h = e.nativeEvent.layout.height
-        if (h > 0) parentHeightSV.value = h
-      },
-      [parentHeightSV]
-    )
 
     useEffect(() => {
       let prev = Dimensions.get('window')
       const sub = Dimensions.addEventListener('change', ({ window }) => {
-        realWindowHeightSV.value = window.height
         const keyboardShrink =
           prev.width === window.width && window.height < prev.height
         prev = window
@@ -320,40 +320,262 @@ export const BottomSheet = forwardRef<BottomSheetRef, BottomSheetProps>(
         screenHeightSV.value = window.height
       })
       return () => sub.remove()
-    }, [screenHeightSV, realWindowHeightSV])
+    }, [screenHeightSV])
 
     useEffect(() => {
       topInsetSV.value = topInset
       bottomInsetSV.value = bottomInset
     }, [topInset, bottomInset, topInsetSV, bottomInsetSV])
 
-    const maxAllowedHeight = screenHeight - topInset
+    // Cap the sheet's natural height to the area between the top and bottom
+    // safe insets — the sheet must never extend behind the system status bar
+    // or the bottom navigation / home indicator. Keyboard handling is layered
+    // on top of this in `sheetStyle` (kbH expands the sheet upward).
+    const maxAllowedHeight = screenHeight - topInset - bottomInset
 
-    // Keyboard handling — driven by reanimated's `useAnimatedKeyboard`.
-    // Both `*TranslucentAndroid` flags must be true for edge-to-edge apps
-    // (Android 15+ default). Without them the hook bakes the nav bar height
-    // into the reported keyboard height, leaving a phantom gap below the
-    // sheet. The flags are no-ops on iOS and on non-edge-to-edge Android, so
-    // they're safe to enable unconditionally.
-    const animatedKeyboard = useAnimatedKeyboard({
-      isStatusBarTranslucentAndroid: true,
-      isNavigationBarTranslucentAndroid: true,
-    })
-    const keyboardHeight = animatedKeyboard.height
+    // Keyboard handling — Native OS sync via `react-native-keyboard-controller`.
+    //
+    // We use `useKeyboardHandler` to perfectly track the OS keyboard animation
+    // without any guesswork or hardcoded 250ms timings. This prevents gaps
+    // between the sheet and the keyboard during drag/animation.
+    //
+    // For Android, we also maintain a JS `keyboardDidShow` fallback. In-place
+    // keyboard swaps (moving focus from a text to a numeric input) sometimes
+    // do not dispatch native inset changes if the IME stays visible but resizes.
+    // The JS fallback catches the height jump and applies a quick `withTiming`
+    // patch if `kbDriven` isn't already perfectly aligned.
+    const shouldHandleKeyboard = keyboardBehavior !== 'none'
+
+    // JS-thread mirror of "keyboard is currently shown". Read by
+    // `setContentHeight` to filter focus-induced layout grows of the
+    // *measured content state*.
+    const keyboardActiveRef = useRef(false)
+    const kbDriven = useSharedValue(0)
+
+    useKeyboardHandler(
+      {
+        onInteractive: (e) => {
+          'worklet'
+          if (!shouldHandleKeyboard) return
+          kbDriven.value = e.height
+        },
+        onMove: (e) => {
+          'worklet'
+          if (!shouldHandleKeyboard) return
+          kbDriven.value = e.height
+        },
+        onEnd: (e) => {
+          'worklet'
+          if (!shouldHandleKeyboard) return
+          kbDriven.value = e.height
+        },
+      },
+      [shouldHandleKeyboard]
+    )
+
+    useEffect(() => {
+      if (!shouldHandleKeyboard) return
+
+      const g = globalThis as unknown as {
+        setTimeout: (fn: () => void, ms: number) => unknown
+        clearTimeout: (handle: unknown) => void
+      }
+      let pendingHide: unknown = null
+      const cancelPendingHide = () => {
+        if (pendingHide !== null) {
+          g.clearTimeout(pendingHide)
+          pendingHide = null
+        }
+      }
+
+      const onShowOrChange = (e: KeyboardEvent) => {
+        const h = e.endCoordinates?.height ?? 0
+        if (h <= 0) return
+        cancelPendingHide()
+        keyboardActiveRef.current = true
+        
+        // If native keyboard-controller didn't hit this exact height (Android type-swap bug),
+        // gracefully animate the difference to catch up.
+        if (Math.abs(kbDriven.value - h) > 1) {
+          kbDriven.value = withTiming(h, {
+            duration: 250,
+            easing: Easing.out(Easing.cubic),
+          })
+        }
+      }
+
+      const onHide = () => {
+        cancelPendingHide()
+        // `useKeyboardHandler` handles the height animation to 0 perfectly.
+        // We just use this event to reset the `keyboardActiveRef` flag after
+        // the animation settles, avoiding layout jitter.
+        pendingHide = g.setTimeout(() => {
+          keyboardActiveRef.current = false
+          pendingHide = null
+        }, 80)
+      }
+
+      const subs = [
+        Keyboard.addListener('keyboardDidShow', onShowOrChange),
+        Keyboard.addListener('keyboardDidChangeFrame', onShowOrChange),
+        Keyboard.addListener('keyboardDidHide', onHide),
+      ]
+      return () => {
+        cancelPendingHide()
+        subs.forEach((s) => s.remove())
+      }
+    }, [shouldHandleKeyboard, kbDriven])
 
     const [renderSheet, setRenderSheet] = useState(isVisible)
     const [searchResetKey, setSearchResetKey] = useState(0)
 
+    // ── Dynamic sizing ──
+    //
+    // When `enableDynamicSizing` is set, the sheet's snap point is derived
+    // from the natural height of its content as reported by
+    // `<BottomSheetView>` / `<BottomSheetScrollView>` / a manual call to
+    // `setContentHeight` from the dynamic-sizing context. The sheet sizes
+    // itself to fit; if content exceeds `maxDynamicSnapFraction` of the
+    // screen, the snap is clamped (and a `BottomSheetScrollView` becomes
+    // scrollable inside the bounded frame).
+    //
+    // Asymmetric thresholds:
+    //   • Grow ≥16dp filters focus-state jitter (border 1→2dp, shadow,
+    //     subtle padding shifts that can stack to ~14-18dp).
+    //   • Shrink ≥4dp lets genuine collapses through immediately.
+    // A symmetric threshold causes contentHeight to ratchet upward across
+    // keyboard show/hide cycles inside one open session: focus events that
+    // bump size past the grow threshold commit, but blur events that only
+    // walk back ~8dp are filtered out.
+    const [measuredContentHeight, setMeasuredContentHeight] = useState<number>(0)
+    // Cache the *smallest* stable measurement seen across the component's
+    // lifetime — this represents the content's natural baseline (no focus
+    // states, no keyboard-induced reflow). On each `isVisible` open we
+    // restore this baseline; if the content has since grown (because, e.g.,
+    // an input is focused or text was typed) `onLayout` will fire and the
+    // state grows to match. Caching the *latest* value instead of the
+    // smallest would let session-time drift (focus jitter, multiline
+    // expansion) propagate into the next open's initial size.
+    const baselineMeasuredRef = useRef(0)
+    const setContentHeight = useCallback((h: number) => {
+      if (h <= 0) return
+      setMeasuredContentHeight((prev: number) => {
+        let next = prev
+        // Asymmetric threshold + keyboard-aware grow filter:
+        //   • Grow ≥ 24dp filters focus-state jitter on common input
+        //     libraries (RNEUI Input shifts ~12-22dp on focus due to
+        //     border-thickness + shadow + label-translation animations).
+        //   • While the keyboard is active we *don't* grow at all — any
+        //     reported size increase during a focus / morph is presumed to
+        //     be focus-state reflow rather than legitimate content growth.
+        //     Content that genuinely needs more space (e.g. multiline text
+        //     a user typed) lives inside `<BottomSheetScrollView>` which
+        //     scrolls within the bounded sheet frame.
+        //   • Shrink ≥ 4dp always lets genuine collapses through.
+        if (h > prev) {
+          if (!keyboardActiveRef.current && h - prev >= 24) next = h
+        } else if (h < prev) {
+          if (prev - h >= 4) next = h
+        }
+        if (next !== prev) {
+          // Baseline tracks the natural "no-keyboard, no-focus" content
+          // height — the snap fraction is computed from it (see
+          // `sortedSnaps`). Update rules:
+          //   • First measurement (baseline === 0): always seed. The
+          //     baseline locks here.
+          //   • Shrink: always (content actually collapsed).
+          //   • Grow: never. Subsequent grows always represent either
+          //     focus-state reflow (ignore) or genuinely larger content
+          //     (handled by `<BottomSheetScrollView>` scrolling inside
+          //     the bounded sheet frame). The baseline is reset on
+          //     dismiss + reopen so consumers that need the sheet to
+          //     resize with new content (e.g. add-row buttons) get a
+          //     fresh measurement on each open.
+          if (
+            baselineMeasuredRef.current === 0 ||
+            next < prev
+          ) {
+            baselineMeasuredRef.current = next
+          }
+        }
+        return next
+      })
+    }, [])
+    const dynamicCtxValue = useMemo(
+      () => (enableDynamicSizing ? { setContentHeight } : null),
+      [enableDynamicSizing, setContentHeight]
+    )
+
+    // On every `isVisible` boundary, re-seed `measuredContentHeight` with
+    // the cached *baseline* (smallest stable measurement seen). First open
+    // uses 0 (cache empty) and the sheet starts at `minDynamicSnapFraction`
+    // — only visible for one frame, then `BottomSheetView` /
+    // `BottomSheetScrollView` reports the actual size and the cache
+    // populates. Subsequent opens start at the baseline; if the content
+    // has since grown the next layout pass updates the state to match.
+    //
+    // Resetting to baseline (instead of the latest measurement) prevents
+    // session-time drift — focus jitter, multiline expansion, etc. — from
+    // making the *next* open render at an inflated size.
+    useEffect(() => {
+      if (!enableDynamicSizing) return
+      setMeasuredContentHeight(baselineMeasuredRef.current)
+    }, [enableDynamicSizing, isVisible])
+
+    // Chrome the lib renders on top of the children — must be reserved
+    // when computing the dynamic snap fraction.
+    const dynamicChromePx = useMemo(() => {
+      let c = 0
+      if (showHandle) c += 12
+      if (title || showCloseButton) c += 48
+      if (searchable) c += 56
+      return c
+    }, [showHandle, title, showCloseButton, searchable])
+
     // ── Snap computation (all derived on UI thread) ──
 
     const snapPoint = snapPointProp ?? 0.6
-    const sortedSnaps = useMemo(
+    const explicitSnaps = useMemo(
       () =>
         snapPointsProp
           ? [...snapPointsProp].sort((a, b) => a - b)
           : [snapPoint],
       [snapPointsProp, snapPoint]
     )
+
+    const sortedSnaps = useMemo(() => {
+      if (!enableDynamicSizing) return explicitSnaps
+      // The snap fraction tracks the *baseline* (smallest stable
+      // measurement) — not the latest measurement. Session-time growths
+      // (focus state, multiline expansion, etc.) are recorded in
+      // `measuredContentHeight` so they trigger this recomputation, but
+      // they don't affect the actual snap value. The sheet size stays
+      // anchored to the natural-baseline content height; anything bigger
+      // scrolls inside `<BottomSheetScrollView>`.
+      const effective =
+        baselineMeasuredRef.current > 0
+          ? baselineMeasuredRef.current
+          : measuredContentHeight
+      const fraction =
+        effective > 0
+          ? Math.min(
+              Math.max(
+                (effective + dynamicChromePx) / screenHeight,
+                minDynamicSnapFraction
+              ),
+              maxDynamicSnapFraction
+            )
+          : minDynamicSnapFraction
+      return [fraction]
+    }, [
+      enableDynamicSizing,
+      explicitSnaps,
+      measuredContentHeight,
+      dynamicChromePx,
+      screenHeight,
+      minDynamicSnapFraction,
+      maxDynamicSnapFraction,
+    ])
 
     const staticMaxHeight = Math.min(
       screenHeight * sortedSnaps[sortedSnaps.length - 1],
@@ -368,13 +590,44 @@ export const BottomSheet = forwardRef<BottomSheetRef, BottomSheetProps>(
     )
     const dismissAtUI = useSharedValue(staticMaxHeight * 0.6)
 
-    // Sync props → shared values (only when props change)
+    // ── Animation shared values ──
+
+    // Initial off-screen position. Because the sheet's bottom is now lifted
+    // above `bottomInset` (see `safeBottom` in `sheetStyle`), translateY needs
+    // an extra `bottomInset` of slide-down to fully clear the screen.
+    const translateY = useSharedValue(staticMaxHeight + bottomInset)
+    const context = useSharedValue(0)
+    const scrollOffset = useSharedValue(0)
+    const scrollRef = useAnimatedRef<FlatList<any>>()
+    const touchStartY = useSharedValue(0)
+
+    // Sync props → shared values when props change. `staticMaxHeight` shifts
+    // whenever the consumer's content size changes (multiline grows, error
+    // message appears, etc.). Track the last committed target so this
+    // effect doesn't re-fire when only `sortedSnaps` changes reference
+    // (a fresh array from `useMemo`) without the fitted fraction moving.
+    const lastMaxHTargetRef = useRef<number | null>(null)
     useEffect(() => {
       sortedSnapsUI.value = sortedSnaps
+      if (lastMaxHTargetRef.current === staticMaxHeight) return
+      const isFirst = lastMaxHTargetRef.current === null
+      lastMaxHTargetRef.current = staticMaxHeight
+      // Always set directly. `kbDriven` already animates the sheet's
+      // bottom; layering another `withTiming` on `maxSheetHeightSV` on
+      // top of that only creates races, none of which we've found a
+      // clean way to suppress. Direct assignment makes content-size
+      // changes a single-frame jump (rare and small) instead of a
+      // colliding animation.
+      void isFirst
       maxSheetHeightSV.value = staticMaxHeight
     }, [sortedSnaps, staticMaxHeight])
 
-    // Derive snap positions on UI thread when maxHeight or screenHeight changes
+    // Derive snap positions on UI thread when maxHeight or screenHeight changes.
+    // After recomputing, re-snap `translateY` to the nearest valid position —
+    // without this, a `maxH` change (content re-measurement on focus/blur)
+    // shifts all snap positions but `translateY` stays stale, causing the
+    // sheet to drift from its intended position. Accumulated across multiple
+    // focus/blur events this produces visually chaotic positioning.
     useAnimatedReaction(
       () => ({ maxH: maxSheetHeightSV.value, sh: screenHeightSV.value }),
       ({ maxH, sh }) => {
@@ -384,18 +637,33 @@ export const BottomSheet = forwardRef<BottomSheetRef, BottomSheetProps>(
           result.push(maxH - sh * snaps[i])
         }
         result.sort((a: number, b: number) => a - b)
+
+        const prevSnaps = snapsUI.value
         snapsUI.value = result
         dismissAtUI.value = maxH - maxH * 0.4
+
+        // Re-snap translateY to nearest valid position. Skip when:
+        //   • sheet is off-screen / dismissing (translateY beyond dismiss)
+        //   • snap positions haven't actually changed (avoids unnecessary writes)
+        const current = translateY.value
+        const dismissThreshold = maxH * 0.5
+        if (current < dismissThreshold && prevSnaps.length > 0) {
+          let nearest = result[0]
+          let minDist = Math.abs(current - nearest)
+          for (let i = 1; i < result.length; i++) {
+            const dist = Math.abs(current - result[i])
+            if (dist < minDist) {
+              minDist = dist
+              nearest = result[i]
+            }
+          }
+          // Only adjust if drifted more than 0.5px (avoid rounding noise)
+          if (minDist > 0.5) {
+            translateY.value = nearest
+          }
+        }
       }
     )
-
-    // ── Animation shared values ──
-
-    const translateY = useSharedValue(staticMaxHeight)
-    const context = useSharedValue(0)
-    const scrollOffset = useSharedValue(0)
-    const scrollRef = useAnimatedRef<FlatList<any>>()
-    const touchStartY = useSharedValue(0)
 
     // ── Callbacks ──
 
@@ -421,14 +689,23 @@ export const BottomSheet = forwardRef<BottomSheetRef, BottomSheetProps>(
     }, [initialSnapIndex, translateY, notifyAnimate, onAnimate, snapsUI])
 
     const close = useCallback(() => {
-      const maxH = maxSheetHeightSV.value
-      translateY.value = withSpring(maxH, SNAP_SPRING, (finished) => {
+      // Dismiss target = sheet height + bottom inset; the latter compensates
+      // for the sheet bottom being lifted above the safe area.
+      const dismissTarget = maxSheetHeightSV.value + bottomInsetSV.value
+      translateY.value = withSpring(dismissTarget, SNAP_SPRING, (finished) => {
         if (finished) {
-          if (onAnimate) runOnJS(notifyAnimate)(maxH)
+          if (onAnimate) runOnJS(notifyAnimate)(dismissTarget)
           runOnJS(handleDismissComplete)()
         }
       })
-    }, [translateY, maxSheetHeightSV, notifyAnimate, handleDismissComplete, onAnimate])
+    }, [
+      translateY,
+      maxSheetHeightSV,
+      bottomInsetSV,
+      notifyAnimate,
+      handleDismissComplete,
+      onAnimate,
+    ])
 
     useImperativeHandle(ref, () => ({
       expand: (index?: number) => {
@@ -508,13 +785,13 @@ export const BottomSheet = forwardRef<BottomSheetRef, BottomSheetProps>(
         )
 
         if (target >= dismissAtUI.value) {
+          const dismissTarget = maxSheetHeightSV.value + bottomInsetSV.value
           translateY.value = withSpring(
-            maxSheetHeightSV.value,
+            dismissTarget,
             SNAP_SPRING,
             (finished) => {
               if (finished) {
-                if (onAnimate)
-                  runOnJS(notifyAnimate)(maxSheetHeightSV.value)
+                if (onAnimate) runOnJS(notifyAnimate)(dismissTarget)
                 runOnJS(handleDismissComplete)()
               }
             }
@@ -529,7 +806,10 @@ export const BottomSheet = forwardRef<BottomSheetRef, BottomSheetProps>(
         }
       })
 
-    // Content gesture — manualActivation: only activate at scroll top + pull down
+    // Content gesture — manualActivation: drives the sheet when either
+    //   • at scroll top + pulling down (collapse / dismiss), or
+    //   • at scroll top + pulling up while a higher snap is available (expand).
+    // Otherwise yields to the list's native scroll.
     const contentPanGesture = Gesture.Pan()
       .manualActivation(true)
       .onTouchesDown((e, _stateManager) => {
@@ -544,13 +824,21 @@ export const BottomSheet = forwardRef<BottomSheetRef, BottomSheetProps>(
         }
 
         const dy = e.allTouches[0].y - touchStartY.value
+        const atScrollTop = scrollOffset.value <= 1
+        const highestSnap = snapsUI.value[0] ?? 0
+        const canExpand = translateY.value > highestSnap + 0.5
 
-        if (scrollOffset.value <= 1 && dy > 8) {
-          // At scroll top + pulling down → activate sheet drag
+        if (dy > 8 && atScrollTop) {
+          // At scroll top + pulling down → drag sheet (collapse / dismiss)
           stateManager.activate()
         } else if (dy < -8) {
-          // Pulling up → let scroll handle exclusively
-          stateManager.fail()
+          if (atScrollTop && canExpand) {
+            // At scroll top + pulling up with room to expand → drag sheet up
+            stateManager.activate()
+          } else {
+            // Already at highest snap, or list is mid-scroll → let scroll handle
+            stateManager.fail()
+          }
         }
       })
       .onStart(() => {
@@ -558,7 +846,11 @@ export const BottomSheet = forwardRef<BottomSheetRef, BottomSheetProps>(
         scrollTo(scrollRef, 0, 0, false)
       })
       .onUpdate((e) => {
-        translateY.value = context.value + Math.max(0, e.translationY)
+        let newY = context.value + e.translationY
+        if (newY < 0) {
+          newY = -rubberBand(-newY, maxSheetHeightSV.value * 0.25)
+        }
+        translateY.value = newY
       })
       .onEnd((e) => {
         const target = findTargetSnap(
@@ -569,13 +861,13 @@ export const BottomSheet = forwardRef<BottomSheetRef, BottomSheetProps>(
         )
 
         if (target >= dismissAtUI.value) {
+          const dismissTarget = maxSheetHeightSV.value + bottomInsetSV.value
           translateY.value = withSpring(
-            maxSheetHeightSV.value,
+            dismissTarget,
             SNAP_SPRING,
             (finished) => {
               if (finished) {
-                if (onAnimate)
-                  runOnJS(notifyAnimate)(maxSheetHeightSV.value)
+                if (onAnimate) runOnJS(notifyAnimate)(dismissTarget)
                 runOnJS(handleDismissComplete)()
               }
             }
@@ -614,66 +906,55 @@ export const BottomSheet = forwardRef<BottomSheetRef, BottomSheetProps>(
     // ── Animated styles ──
 
     const sheetStyle = useAnimatedStyle(() => {
-      const kbH = keyboardHeight.value
+      // `kbDriven` is animated by JS keyboard events (`Keyboard.addListener`
+      // → `withTiming`). It always lands precisely on the OS-announced
+      // target, including in-place keyboard swaps where the native IME
+      // inset doesn't transition reliably on Android.
+      const kbH = kbDriven.value
       const maxH = maxSheetHeightSV.value
       const sh = screenHeightSV.value
-      const shReal = realWindowHeightSV.value
-      const parentH = parentHeightSV.value
       const top = topInsetSV.value
       const bot = bottomInsetSV.value
 
-      // Where the sheet's bottom should sit (in parent coords). Two
-      // independent constraints — use whichever is tighter:
-      //   • Keyboard: sheet bottom must not exceed the keyboard top.
-      //     We need a total upward shift of `kbH` from the unshrunk window
-      //     bottom. The OS may have already done part of that shift by
-      //     shrinking the window itself (Android non-edge-to-edge with
-      //     adjustResize); only apply the remainder. `max(0, …)` covers the
-      //     rare case where the OS over-shrinks (windowShrink > kbH).
-      //   • Parent bottom: sheet bottom must not exceed the parent's own
-      //     bottom — this keeps the sheet above sibling UI like bottom
-      //     tabs when the keyboard is hidden.
-      const windowShrink = Math.max(0, sh - shReal)
-      const effectiveShift =
-        kbH > 0 && keyboardBehavior === 'padding'
-          ? Math.max(0, kbH - windowShrink)
-          : 0
-      const anchorBottom = Math.min(shReal - effectiveShift, parentH)
-      // On rubber-band overdrag up (translateY < 0), keep the bottom anchored
-      // to the parent edge so the sheet grows taller instead of sliding up
-      // and exposing the backdrop below it. Top still follows translateY.
+      // Sheet's bottom edge sits above the keyboard top when the keyboard
+      // is up, otherwise above the bottom safe area. `Math.max(bot, kbH)`
+      // collapses both cases into one shift from the screen bottom.
+      const handlesKeyboard = kbH > 0 && keyboardBehavior === 'padding'
+      const effectiveKb = handlesKeyboard ? kbH : 0
+      const bottomShift = Math.max(bot, effectiveKb)
+      const anchorBottom = sh - bottomShift
+      // On rubber-band overdrag up (translateY < 0), keep the bottom
+      // anchored so the sheet grows taller instead of sliding up and
+      // exposing the backdrop below it. Top still follows translateY.
       const desiredBottom =
         translateY.value < 0 ? anchorBottom : anchorBottom + translateY.value
 
-      // 'height' mode grows the sheet under the keyboard.
+      // `'height'` keyboard mode grows the sheet under the keyboard
+      // (consumer is expected to handle their own scroll inside).
       const baseHeight =
         kbH > 0 && keyboardBehavior === 'height' ? maxH + kbH : maxH
 
-      // Clamp top to safe area and shrink height to fit — the ScrollView
-      // inside absorbs the reduced space.
+      // Clamp top to the safe area and shrink height to fit when the
+      // sheet's natural top would otherwise land above it.
       const naturalTop = anchorBottom + translateY.value - baseHeight
       const sheetTop = naturalTop < top ? top : naturalTop
       const height = Math.max(0, desiredBottom - sheetTop)
 
-      const paddingBottom = kbH > 0 && keyboardBehavior !== 'none' ? 0 : bot
-
       // Directly set `top` and `height` — no `bottom:0 + transform` trick.
       // Keeps layout semantics unambiguous: `top` is literally the sheet's
       // top edge in parent coords. Rendered top === sheetTop ≥ topInset.
+      // The sheet's bottom is already lifted above the bottom safe area via
+      // `safeBottom`, so no `paddingBottom` is needed here.
       return {
         top: sheetTop,
         height,
-        paddingBottom,
       }
     })
 
     if (!renderSheet && !isVisible) return null
 
     return (
-      <View
-        style={StyleSheet.absoluteFill}
-        onLayout={handleParentLayout}
-      >
+      <View style={StyleSheet.absoluteFill}>
         <BottomSheetBackdrop
           translateY={translateY}
           maxHeight={maxSheetHeightSV}
@@ -705,21 +986,21 @@ export const BottomSheet = forwardRef<BottomSheetRef, BottomSheetProps>(
             onClose={close}
           />
 
-          <BottomSheetContent
-            searchable={searchable}
-            searchPlaceholder={searchPlaceholder}
-            onSearch={onSearch}
-            searchResetKey={searchResetKey}
-            themeProp={themeProp}
-            renderSearchIcon={renderSearchIcon}
-            renderClearIcon={renderClearIcon}
-            ctxValue={ctxRef.current}
-            contentRef={contentRef}
-            onLayout={isDynamic ? handleContentLayout : undefined}
-            isDynamic={isDynamic}
-          >
-            {children}
-          </BottomSheetContent>
+          <BottomSheetDynamicSizingCtx.Provider value={dynamicCtxValue}>
+            <BottomSheetContent
+              searchable={searchable}
+              searchPlaceholder={searchPlaceholder}
+              onSearch={onSearch}
+              searchResetKey={searchResetKey}
+              themeProp={themeProp}
+              renderSearchIcon={renderSearchIcon}
+              renderClearIcon={renderClearIcon}
+              ctxValue={ctxRef.current}
+              bottomPadding={bottomInset}
+            >
+              {children}
+            </BottomSheetContent>
+          </BottomSheetDynamicSizingCtx.Provider>
         </Animated.View>
       </View>
     )
@@ -757,17 +1038,9 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: '700',
   },
-  // Static mode (consumer passes a `snapPoint` / `snapPoints`): the sheet has
-  // a fixed height set via animated style; the inner content fills the
-  // remaining space below the chrome so a child ScrollView/FlatList has a
-  // bounded viewport to scroll in.
-  contentBounded: {
+  content: {
     flex: 1,
   },
-  // Dynamic mode (no snap props): no flex constraint, so the children's
-  // natural height drives the sheet size. The library measures this view
-  // and adds chrome + safe-area-bottom internally.
-  contentNatural: {},
   closeIcon: {
     width: 24,
     height: 24,

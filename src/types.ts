@@ -31,6 +31,32 @@ export interface BottomSheetProps {
   /** Index of the initial snap point. Default: 0 */
   initialSnapIndex?: number
 
+  /**
+   * Auto-size the sheet to its content. When true, `snapPoint` / `snapPoints`
+   * are ignored — the sheet measures the height of `<BottomSheetView>` /
+   * `<BottomSheetScrollView>` children and sizes itself to fit. The
+   * computed snap is clamped between `minDynamicSnapFraction` and
+   * `maxDynamicSnapFraction`.
+   *
+   * Default: false.
+   */
+  enableDynamicSizing?: boolean
+
+  /**
+   * Lower bound on the auto-sized snap fraction. Also the snap fraction
+   * the sheet renders at *before* the first content measurement arrives.
+   * Only used when `enableDynamicSizing` is true. Default: 0.3.
+   */
+  minDynamicSnapFraction?: number
+
+  /**
+   * Upper bound on the auto-sized snap fraction. Content larger than this
+   * gets clamped, and the sheet's body becomes scrollable inside its frame
+   * (when `<BottomSheetScrollView>` is used). Only used when
+   * `enableDynamicSizing` is true. Default: 0.9.
+   */
+  maxDynamicSnapFraction?: number
+
   /** Show the search bar. Default: false */
   searchable?: boolean
   searchPlaceholder?: string
