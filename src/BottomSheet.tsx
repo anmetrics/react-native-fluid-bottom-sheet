@@ -33,8 +33,8 @@ import Animated, {
   scrollTo,
   withSpring,
   withTiming,
-  Easing,
   runOnJS,
+  cancelAnimation,
   type SharedValue,
 } from 'react-native-reanimated'
 import { Gesture, GestureDetector } from 'react-native-gesture-handler'
@@ -42,7 +42,10 @@ import {
   useSafeAreaInsets,
   initialWindowMetrics,
 } from 'react-native-safe-area-context'
-import { useKeyboardHandler } from 'react-native-keyboard-controller'
+import {
+  useKeyboardHandler,
+  KeyboardController,
+} from 'react-native-keyboard-controller'
 
 import type { BottomSheetProps, BottomSheetRef } from './types'
 import type { BottomSheetScrollContext } from './context'
@@ -50,6 +53,10 @@ import { BottomSheetScrollCtx, BottomSheetDynamicSizingCtx } from './context'
 import { SearchBar } from './SearchBar'
 import { SNAP_SPRING, DEFAULT_THEME } from './constants'
 import { rubberBand, findTargetSnap, computeSnapPositions } from './worklets'
+
+// Captured at module scope so worklets receive a primitive constant rather
+// than reaching into the `Platform` object on the UI thread.
+const IS_IOS = Platform.OS === 'ios'
 
 /** Optional haptic feedback helper */
 const triggerHaptic = () => {
@@ -333,46 +340,101 @@ export const BottomSheet = forwardRef<BottomSheetRef, BottomSheetProps>(
     // on top of this in `sheetStyle` (kbH expands the sheet upward).
     const maxAllowedHeight = screenHeight - topInset - bottomInset
 
-    // Keyboard handling — Native OS sync via `react-native-keyboard-controller`.
+    // Keyboard handling — driven by `react-native-keyboard-controller`'s
+    // `useKeyboardHandler` for native frame-perfect tracking.
     //
-    // We use `useKeyboardHandler` to perfectly track the OS keyboard animation
-    // without any guesswork or hardcoded 250ms timings. This prevents gaps
-    // between the sheet and the keyboard during drag/animation.
+    // The library exposes per-frame worklet callbacks that originate from
+    // the OS keyboard animation directly:
+    //   • Android: `onMove` fires every frame during IME animation
+    //     (powered by `WindowInsetsAnimationCompat`). This includes
+    //     in-place keyboard type swaps (text ↔ numeric) — the IME inset
+    //     animation API dispatches frames for the resize transition.
+    //   • iOS: only `onStart` fires with the destination height + native
+    //     curve duration (`e.duration`). We match that with `withTiming`
+    //     so the sheet animates in lock-step with iOS's keyboard curve.
+    //   • `onEnd` and `onInteractive` finalize/track interactive dismiss.
     //
-    // For Android, we also maintain a JS `keyboardDidShow` fallback. In-place
-    // keyboard swaps (moving focus from a text to a numeric input) sometimes
-    // do not dispatch native inset changes if the IME stays visible but resizes.
-    // The JS fallback catches the height jump and applies a quick `withTiming`
-    // patch if `kbDriven` isn't already perfectly aligned.
+    // Driving `kbDriven` directly from these events means no curve
+    // approximation, no JS-thread → UI-thread bridging cost mid-animation,
+    // and no race between two animation sources.
     const shouldHandleKeyboard = keyboardBehavior !== 'none'
 
     // JS-thread mirror of "keyboard is currently shown". Read by
     // `setContentHeight` to filter focus-induced layout grows of the
-    // *measured content state*.
+    // *measured content state* while the keyboard is active.
     const keyboardActiveRef = useRef(false)
-    const kbDriven = useSharedValue(0)
+    // Initialize from the library's last-known state so the sheet renders
+    // correctly when it mounts with the keyboard already visible (e.g.
+    // navigating into a screen that auto-focuses an input). Without this
+    // seed, `useKeyboardHandler` wouldn't fire any events (the keyboard
+    // isn't moving) and `kbDriven` would stay at 0 until the next show /
+    // hide event.
+    const kbDriven = useSharedValue(
+      KeyboardController.isVisible() ? KeyboardController.state().height : 0
+    )
+    useEffect(() => {
+      if (KeyboardController.isVisible()) {
+        keyboardActiveRef.current = true
+      }
+    }, [])
 
     useKeyboardHandler(
       {
-        onInteractive: (e) => {
+        onStart: (e) => {
           'worklet'
           if (!shouldHandleKeyboard) return
-          kbDriven.value = e.height
+          // iOS: this is the only event that carries the destination
+          // height + the OS animation duration. Match the native curve
+          // exactly with `withTiming(e.height, { duration: e.duration })`.
+          // Android: `onMove` will drive per-frame from here, so we don't
+          // need to animate on start.
+          if (IS_IOS) {
+            // Defensive: some iOS edge cases (interactive dismiss, modal
+            // transitions) can deliver duration <= 0; clamp to a sane
+            // minimum so `withTiming` doesn't degenerate into a snap.
+            const duration = e.duration > 0 ? e.duration : 250
+            kbDriven.value = withTiming(e.height, { duration })
+          }
         },
         onMove: (e) => {
           'worklet'
           if (!shouldHandleKeyboard) return
-          kbDriven.value = e.height
+          // Android only — per-frame native height. Pixel-perfect
+          // tracking, including in-place text↔numeric keyboard swaps.
+          if (!IS_IOS) {
+            cancelAnimation(kbDriven)
+            kbDriven.value = e.height
+          }
         },
         onEnd: (e) => {
           'worklet'
           if (!shouldHandleKeyboard) return
+          // Final landing — Android's last frame, or iOS's settle event.
+          // On iOS we let `withTiming` from `onStart` reach its target;
+          // overriding here would cause a final-frame snap.
+          if (!IS_IOS) {
+            kbDriven.value = e.height
+          }
+        },
+        onInteractive: (e) => {
+          'worklet'
+          if (!shouldHandleKeyboard) return
+          // Interactive (drag-down) keyboard dismiss — both platforms.
+          cancelAnimation(kbDriven)
           kbDriven.value = e.height
         },
       },
       [shouldHandleKeyboard]
     )
 
+    // Plain JS keyboard listeners — only used to flip `keyboardActiveRef`
+    // (the content-size filter flag). No animation logic here.
+    //
+    // We listen to `Will`-prefixed events (iOS only — they don't fire on
+    // Android) in addition to `Did`-prefixed events so the flag flips
+    // BEFORE focus-induced layout grows, not after. On Android, only the
+    // `Did` events fire, but that's fine: Android focus changes don't
+    // typically race with grow measurements the way iOS does.
     useEffect(() => {
       if (!shouldHandleKeyboard) return
 
@@ -387,44 +449,31 @@ export const BottomSheet = forwardRef<BottomSheetRef, BottomSheetProps>(
           pendingHide = null
         }
       }
-
-      const onShowOrChange = (e: KeyboardEvent) => {
-        const h = e.endCoordinates?.height ?? 0
-        if (h <= 0) return
+      const onShow = () => {
         cancelPendingHide()
         keyboardActiveRef.current = true
-        
-        // If native keyboard-controller didn't hit this exact height (Android type-swap bug),
-        // gracefully animate the difference to catch up.
-        if (Math.abs(kbDriven.value - h) > 1) {
-          kbDriven.value = withTiming(h, {
-            duration: 250,
-            easing: Easing.out(Easing.cubic),
-          })
-        }
       }
-
       const onHide = () => {
         cancelPendingHide()
-        // `useKeyboardHandler` handles the height animation to 0 perfectly.
-        // We just use this event to reset the `keyboardActiveRef` flag after
-        // the animation settles, avoiding layout jitter.
+        // Defer the flag flip so `setContentHeight` doesn't accept a
+        // focus-jitter grow that fires in the same tick as
+        // `keyboardDidHide`.
         pendingHide = g.setTimeout(() => {
           keyboardActiveRef.current = false
           pendingHide = null
         }, 80)
       }
-
       const subs = [
-        Keyboard.addListener('keyboardDidShow', onShowOrChange),
-        Keyboard.addListener('keyboardDidChangeFrame', onShowOrChange),
+        Keyboard.addListener('keyboardWillShow', onShow),
+        Keyboard.addListener('keyboardDidShow', onShow),
+        Keyboard.addListener('keyboardDidChangeFrame', onShow),
         Keyboard.addListener('keyboardDidHide', onHide),
       ]
       return () => {
         cancelPendingHide()
         subs.forEach((s) => s.remove())
       }
-    }, [shouldHandleKeyboard, kbDriven])
+    }, [shouldHandleKeyboard])
 
     const [renderSheet, setRenderSheet] = useState(isVisible)
     const [searchResetKey, setSearchResetKey] = useState(0)
@@ -906,10 +955,10 @@ export const BottomSheet = forwardRef<BottomSheetRef, BottomSheetProps>(
     // ── Animated styles ──
 
     const sheetStyle = useAnimatedStyle(() => {
-      // `kbDriven` is animated by JS keyboard events (`Keyboard.addListener`
-      // → `withTiming`). It always lands precisely on the OS-announced
-      // target, including in-place keyboard swaps where the native IME
-      // inset doesn't transition reliably on Android.
+      // `kbDriven` is driven by `useKeyboardHandler`'s native worklet
+      // events: per-frame on Android, `withTiming(target, native-duration)`
+      // on iOS. Tracks the OS keyboard frame-by-frame including in-place
+      // text↔numeric type swaps.
       const kbH = kbDriven.value
       const maxH = maxSheetHeightSV.value
       const sh = screenHeightSV.value
