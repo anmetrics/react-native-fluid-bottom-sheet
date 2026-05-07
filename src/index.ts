@@ -18,3 +18,4 @@ export type {
   BottomSheetRef,
   BottomSheetTheme
 } from './types'
+export { configureKeyboardDriver } from './keyboardCompat'

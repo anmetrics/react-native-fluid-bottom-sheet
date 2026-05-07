@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(/bin/npx tsc *)",
+      "Bash(/usr/local/bin/node /usr/local/bin/npm pack --dry-run)"
+    ]
+  }
+}

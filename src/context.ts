@@ -6,6 +6,7 @@ import type { Gesture } from 'react-native-gesture-handler'
 export interface BottomSheetScrollContext {
   scrollHandler: ReturnType<typeof useAnimatedScrollHandler>
   contentGesture: ReturnType<typeof Gesture.Simultaneous>
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   scrollRef: AnimatedRef<FlatList<any>>
 }
 

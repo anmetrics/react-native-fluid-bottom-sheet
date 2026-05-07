@@ -1,6 +1,6 @@
 {
   "name": "react-native-fluid-bottom-sheet",
-  "version": "1.5.2",
+  "version": "1.6.0",
   "description": "A performant, gesture-driven bottom sheet for React Native with snap points, search bar, and FlatList support.",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
@@ -45,6 +45,11 @@
     "url": "https://github.com/anmetrics/react-native-fluid-bottom-sheet/issues"
   },
   "homepage": "https://github.com/anmetrics/react-native-fluid-bottom-sheet#readme",
+  "peerDependenciesMeta": {
+    "react-native-keyboard-controller": {
+      "optional": true
+    }
+  },
   "peerDependencies": {
     "react": ">=18.0.0",
     "react-native": ">=0.71.0",

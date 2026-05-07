@@ -23,19 +23,32 @@ npm install react-native-fluid-bottom-sheet
 ### Peer dependencies
 
 ```bash
-npm install react-native-reanimated react-native-gesture-handler react-native-safe-area-context react-native-keyboard-controller
+# Required
+npm install react-native-reanimated react-native-gesture-handler react-native-safe-area-context
+
+# Optional — for frame-perfect keyboard tracking on Android (bare RN / EAS builds)
+npm install react-native-keyboard-controller
 ```
 
-| Peer | Required version |
-|------|------------------|
-| `react` | `>=18.0.0` |
-| `react-native` | `>=0.71.0` |
-| `react-native-reanimated` | `>=3.4.0` |
-| `react-native-gesture-handler` | `>=2.0.0` |
-| `react-native-safe-area-context` | `>=4.0.0` |
-| `react-native-keyboard-controller` | `>=1.21.7` |
+| Peer | Required version | Required? |
+|------|------------------|-----------|
+| `react` | `>=18.0.0` | ✅ |
+| `react-native` | `>=0.71.0` | ✅ |
+| `react-native-reanimated` | `>=3.4.0` | ✅ |
+| `react-native-gesture-handler` | `>=2.0.0` | ✅ |
+| `react-native-safe-area-context` | `>=4.0.0` | ✅ |
+| `react-native-keyboard-controller` | `>=1.21.7` | Optional |
 
-All of these ship native code — after installing you'll need to rebuild your app once (`pod install` for iOS / a Gradle rebuild for Android) so their native modules are linked. Expo users: compatible with EAS dev builds; not with Expo Go.
+After installing native peers, rebuild your app once (`pod install` for iOS / Gradle rebuild for Android) so their native modules are linked.
+
+**Expo Go is supported** — no native rebuild needed. The library auto-detects whether `react-native-keyboard-controller` is linked:
+
+| Environment | Keyboard tracking |
+|---|---|
+| Bare RN / EAS + `keyboard-controller` linked | UI thread, frame-perfect, handles Android keyboard type-swaps |
+| Expo Go / `keyboard-controller` not linked | UI thread via Reanimated's `useAnimatedKeyboard` — smooth, minor Android type-swap limitation |
+
+See [`configureKeyboardDriver`](#configurekeyboarddriver) to override the auto-detection.
 
 ### Setup
 
@@ -59,7 +72,7 @@ export default function App() {
 
 `initialMetrics` is important — without it, `useSafeAreaInsets()` returns 0 on the first render and the sheet briefly anchors at the wrong position before insets propagate.
 
-The `KeyboardProvider` from `react-native-keyboard-controller` is wired internally by `<BottomSheetModalProvider>` (see below). You don't have to import or wrap with it yourself.
+`KeyboardProvider` (from `react-native-keyboard-controller` when linked, or a no-op wrapper otherwise) is wired internally by `<BottomSheetModalProvider>`. You don't have to import or wrap with it yourself.
 
 ### Android
 
@@ -259,9 +272,11 @@ The default behavior — `keyboardBehavior="padding"` — keeps the sheet's bott
 | `'height'` | Grows the sheet taller while keeping its bottom anchored, exposing its content under the keyboard's typical position. |
 | `'none'` | Ignores the keyboard. The consumer is responsible for layout. |
 
-The library uses `useAnimatedKeyboard` for the per-frame inset, plus a JS-thread listener on `keyboard{Will,Did}{Show,ChangeFrame,Hide}` to track the OS-announced *target* keyboard height. The worklet clips the per-frame value to that target. This kills the brief "bob to the previous keyboard's height" you'd otherwise see when swapping between two inputs that use different-height keyboards (text → phone-pad, etc.). See `CHANGELOG.md` 1.3.0 for details.
+When `react-native-keyboard-controller` is linked, the library drives keyboard height via `useKeyboardHandler` worklet callbacks — per-frame on Android (via `WindowInsetsAnimationCompat`, including in-place keyboard type-swaps), `withTiming` matched to the native curve on iOS.
 
-`isStatusBarTranslucentAndroid` and `isNavigationBarTranslucentAndroid` are passed to `useAnimatedKeyboard` as `true` — required on Android edge-to-edge so the inset isn't double-counted with the nav bar.
+When it is not linked (Expo Go), the library falls back to Reanimated's `useAnimatedKeyboard` — also UI thread and smooth, but does not catch in-place keyboard type-swaps on Android.
+
+`isStatusBarTranslucentAndroid` and `isNavigationBarTranslucentAndroid` are always `true` — required on Android edge-to-edge so the inset isn't double-counted with the nav bar.
 
 ## API
 
@@ -292,7 +307,7 @@ The library uses `useAnimatedKeyboard` for the per-frame inset, plus a JS-thread
 | `maxDynamicSnapFraction` | `number` | `0.9` | Upper bound on the auto-sized snap fraction. Content larger than this scrolls inside the bounded frame (when `BottomSheetScrollView` is used). |
 | `enableHaptics` | `boolean` | `false` | Trigger haptic feedback on snap. Requires `react-native-haptic-feedback` or `expo-haptics`; silently no-ops if neither is installed. |
 | `onSnap` | `(index: number) => void` | — | Fires after the sheet snaps to a snap point. |
-| `onAnimate` | `(from, to) => void` | — | Fires when an open / close / snap animation completes. |
+| `onAnimate` | `(toIndex: number) => void` | — | Fires when an animation completes. `toIndex` is the destination snap index, or `-1` when closing. |
 | `accessibilityLabel` | `string` | — | A11y label for the sheet. |
 | `accessibilityRole` | `string` | `'adjustable'` | A11y role for the sheet. |
 | `closeButtonAccessibilityLabel` | `string` | `'Close bottom sheet'` | A11y label for the close button. |
@@ -383,6 +398,22 @@ interface BottomSheetTheme {
 ```
 
 Pass partial overrides via the `theme` prop — unspecified keys fall back to defaults.
+
+### `configureKeyboardDriver`
+
+Override which keyboard tracking implementation the sheet uses. Call once at app startup, before any sheet renders.
+
+```ts
+import { configureKeyboardDriver } from 'react-native-fluid-bottom-sheet'
+
+configureKeyboardDriver('reanimated') // always use useAnimatedKeyboard
+configureKeyboardDriver('auto')       // default: use keyboard-controller if linked
+```
+
+| Value | Behavior |
+|-------|----------|
+| `'auto'` (default) | Use `react-native-keyboard-controller` if linked, fall back to `useAnimatedKeyboard` otherwise. |
+| `'reanimated'` | Always use `useAnimatedKeyboard`, even if `react-native-keyboard-controller` is installed. |
 
 ## Caveats
 

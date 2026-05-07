@@ -7,7 +7,7 @@ import React, {
   useState,
   type ReactNode
 } from 'react'
-import { KeyboardProvider } from 'react-native-keyboard-controller'
+import { KeyboardProvider } from './keyboardCompat'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // BottomSheetModalProvider — provides a "host" location at the top of the

@@ -32,9 +32,7 @@ import Animated, {
   Extrapolation,
   scrollTo,
   withSpring,
-  withTiming,
   runOnJS,
-  cancelAnimation,
   type SharedValue,
 } from 'react-native-reanimated'
 import { Gesture, GestureDetector } from 'react-native-gesture-handler'
@@ -42,10 +40,7 @@ import {
   useSafeAreaInsets,
   initialWindowMetrics,
 } from 'react-native-safe-area-context'
-import {
-  useKeyboardHandler,
-  KeyboardController,
-} from 'react-native-keyboard-controller'
+import { useKbHeight, getInitialKbVisible } from './keyboardCompat'
 
 import type { BottomSheetProps, BottomSheetRef } from './types'
 import type { BottomSheetScrollContext } from './context'
@@ -54,9 +49,6 @@ import { SearchBar } from './SearchBar'
 import { SNAP_SPRING, DEFAULT_THEME } from './constants'
 import { rubberBand, findTargetSnap, computeSnapPositions } from './worklets'
 
-// Captured at module scope so worklets receive a primitive constant rather
-// than reaching into the `Platform` object on the UI thread.
-const IS_IOS = Platform.OS === 'ios'
 
 /** Optional haptic feedback helper */
 const triggerHaptic = () => {
@@ -113,7 +105,7 @@ const BottomSheetBackdrop = memo(function BottomSheetBackdrop({
 })
 
 interface HeaderProps {
-  gesture: any
+  gesture: ReturnType<typeof Gesture.Pan>
   showHandle: boolean
   handleColor: string
   title?: string
@@ -340,92 +332,24 @@ export const BottomSheet = forwardRef<BottomSheetRef, BottomSheetProps>(
     // on top of this in `sheetStyle` (kbH expands the sheet upward).
     const maxAllowedHeight = screenHeight - topInset - bottomInset
 
-    // Keyboard handling — driven by `react-native-keyboard-controller`'s
-    // `useKeyboardHandler` for native frame-perfect tracking.
-    //
-    // The library exposes per-frame worklet callbacks that originate from
-    // the OS keyboard animation directly:
-    //   • Android: `onMove` fires every frame during IME animation
-    //     (powered by `WindowInsetsAnimationCompat`). This includes
-    //     in-place keyboard type swaps (text ↔ numeric) — the IME inset
-    //     animation API dispatches frames for the resize transition.
-    //   • iOS: only `onStart` fires with the destination height + native
-    //     curve duration (`e.duration`). We match that with `withTiming`
-    //     so the sheet animates in lock-step with iOS's keyboard curve.
-    //   • `onEnd` and `onInteractive` finalize/track interactive dismiss.
-    //
-    // Driving `kbDriven` directly from these events means no curve
-    // approximation, no JS-thread → UI-thread bridging cost mid-animation,
-    // and no race between two animation sources.
     const shouldHandleKeyboard = keyboardBehavior !== 'none'
 
     // JS-thread mirror of "keyboard is currently shown". Read by
     // `setContentHeight` to filter focus-induced layout grows of the
     // *measured content state* while the keyboard is active.
     const keyboardActiveRef = useRef(false)
-    // Initialize from the library's last-known state so the sheet renders
-    // correctly when it mounts with the keyboard already visible (e.g.
-    // navigating into a screen that auto-focuses an input). Without this
-    // seed, `useKeyboardHandler` wouldn't fire any events (the keyboard
-    // isn't moving) and `kbDriven` would stay at 0 until the next show /
-    // hide event.
-    const kbDriven = useSharedValue(
-      KeyboardController.isVisible() ? KeyboardController.state().height : 0
-    )
     useEffect(() => {
-      if (KeyboardController.isVisible()) {
+      if (getInitialKbVisible()) {
         keyboardActiveRef.current = true
       }
     }, [])
 
-    useKeyboardHandler(
-      {
-        onStart: (e) => {
-          'worklet'
-          if (!shouldHandleKeyboard) return
-          // iOS: this is the only event that carries the destination
-          // height + the OS animation duration. Match the native curve
-          // exactly with `withTiming(e.height, { duration: e.duration })`.
-          // Android: `onMove` will drive per-frame from here, so we don't
-          // need to animate on start.
-          if (IS_IOS) {
-            // Defensive: some iOS edge cases (interactive dismiss, modal
-            // transitions) can deliver duration <= 0; clamp to a sane
-            // minimum so `withTiming` doesn't degenerate into a snap.
-            const duration = e.duration > 0 ? e.duration : 250
-            kbDriven.value = withTiming(e.height, { duration })
-          }
-        },
-        onMove: (e) => {
-          'worklet'
-          if (!shouldHandleKeyboard) return
-          // Android only — per-frame native height. Pixel-perfect
-          // tracking, including in-place text↔numeric keyboard swaps.
-          if (!IS_IOS) {
-            cancelAnimation(kbDriven)
-            kbDriven.value = e.height
-          }
-        },
-        onEnd: (e) => {
-          'worklet'
-          if (!shouldHandleKeyboard) return
-          // Final landing — Android's last frame, or iOS's settle event.
-          // On iOS we let `withTiming` from `onStart` reach its target;
-          // overriding here would cause a final-frame snap.
-          if (!IS_IOS) {
-            kbDriven.value = e.height
-          }
-        },
-        onInteractive: (e) => {
-          'worklet'
-          if (!shouldHandleKeyboard) return
-          // Interactive (drag-down) keyboard dismiss — both platforms.
-          cancelAnimation(kbDriven)
-          kbDriven.value = e.height
-        },
-      },
-      [shouldHandleKeyboard]
-    )
+    // UI-thread shared value tracking the current keyboard height.
+    // Native builds: driven by `useKeyboardHandler` worklet callbacks
+    // (frame-perfect, handles Android keyboard type-swaps).
+    // Expo Go: driven by `useAnimatedKeyboard` (also UI thread, smooth,
+    // but does not catch in-place keyboard type-swaps on Android).
+    const kbDriven = useKbHeight(shouldHandleKeyboard)
 
     // Plain JS keyboard listeners — only used to flip `keyboardActiveRef`
     // (the content-size filter flag). No animation logic here.
@@ -647,6 +571,7 @@ export const BottomSheet = forwardRef<BottomSheetRef, BottomSheetProps>(
     const translateY = useSharedValue(staticMaxHeight + bottomInset)
     const context = useSharedValue(0)
     const scrollOffset = useSharedValue(0)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const scrollRef = useAnimatedRef<FlatList<any>>()
     const touchStartY = useSharedValue(0)
 
@@ -717,10 +642,10 @@ export const BottomSheet = forwardRef<BottomSheetRef, BottomSheetProps>(
     // ── Callbacks ──
 
     const notifyAnimate = useCallback(
-      (target: number) => {
-        onAnimate?.(target, maxSheetHeightSV.value)
+      (toIndex: number) => {
+        onAnimate?.(toIndex)
       },
-      [onAnimate, maxSheetHeightSV]
+      [onAnimate]
     )
 
     const handleDismissComplete = useCallback(() => {
@@ -731,9 +656,10 @@ export const BottomSheet = forwardRef<BottomSheetRef, BottomSheetProps>(
     const open = useCallback(() => {
       setRenderSheet(true)
       const snaps = snapsUI.value
-      const target = snaps[Math.min(initialSnapIndex, snaps.length - 1)]
+      const idx = Math.min(initialSnapIndex, snaps.length - 1)
+      const target = snaps[idx]
       translateY.value = withSpring(target, SNAP_SPRING, (finished) => {
-        if (finished && onAnimate) runOnJS(notifyAnimate)(target)
+        if (finished && onAnimate) runOnJS(notifyAnimate)(idx)
       })
     }, [initialSnapIndex, translateY, notifyAnimate, onAnimate, snapsUI])
 
@@ -743,7 +669,7 @@ export const BottomSheet = forwardRef<BottomSheetRef, BottomSheetProps>(
       const dismissTarget = maxSheetHeightSV.value + bottomInsetSV.value
       translateY.value = withSpring(dismissTarget, SNAP_SPRING, (finished) => {
         if (finished) {
-          if (onAnimate) runOnJS(notifyAnimate)(dismissTarget)
+          if (onAnimate) runOnJS(notifyAnimate)(-1)
           runOnJS(handleDismissComplete)()
         }
       })
@@ -759,27 +685,27 @@ export const BottomSheet = forwardRef<BottomSheetRef, BottomSheetProps>(
     useImperativeHandle(ref, () => ({
       expand: (index?: number) => {
         const snaps = snapsUI.value
-        const target =
-          index !== undefined
-            ? snaps[Math.min(index, snaps.length - 1)]
-            : snaps[0]
+        const idx = index !== undefined ? Math.min(index, snaps.length - 1) : 0
+        const target = snaps[idx]
         translateY.value = withSpring(target, SNAP_SPRING, (finished) => {
-          if (finished && onAnimate) runOnJS(notifyAnimate)(target)
+          if (finished && onAnimate) runOnJS(notifyAnimate)(idx)
         })
       },
       collapse: () => {
         const snaps = snapsUI.value
-        const target = snaps[snaps.length - 1]
+        const idx = snaps.length - 1
+        const target = snaps[idx]
         translateY.value = withSpring(target, SNAP_SPRING, (finished) => {
-          if (finished && onAnimate) runOnJS(notifyAnimate)(target)
+          if (finished && onAnimate) runOnJS(notifyAnimate)(idx)
         })
       },
       close: () => close(),
       snapTo: (index: number) => {
         const snaps = snapsUI.value
-        const target = snaps[Math.min(index, snaps.length - 1)]
+        const idx = Math.min(index, snaps.length - 1)
+        const target = snaps[idx]
         translateY.value = withSpring(target, SNAP_SPRING, (finished) => {
-          if (finished && onAnimate) runOnJS(notifyAnimate)(target)
+          if (finished && onAnimate) runOnJS(notifyAnimate)(idx)
         })
       },
     }))
@@ -840,17 +766,17 @@ export const BottomSheet = forwardRef<BottomSheetRef, BottomSheetProps>(
             SNAP_SPRING,
             (finished) => {
               if (finished) {
-                if (onAnimate) runOnJS(notifyAnimate)(dismissTarget)
+                if (onAnimate) runOnJS(notifyAnimate)(-1)
                 runOnJS(handleDismissComplete)()
               }
             }
           )
         } else {
+          const snapIdx = snapsUI.value.indexOf(target)
           translateY.value = withSpring(target, SNAP_SPRING, (finished) => {
-            if (finished && onAnimate) runOnJS(notifyAnimate)(target)
+            if (finished && onAnimate) runOnJS(notifyAnimate)(snapIdx)
           })
-          const index = snapsUI.value.indexOf(target)
-          if (onSnap) runOnJS(onSnap)(index)
+          if (onSnap) runOnJS(onSnap)(snapIdx)
           if (enableHaptics) runOnJS(triggerHaptic)()
         }
       })
@@ -916,17 +842,17 @@ export const BottomSheet = forwardRef<BottomSheetRef, BottomSheetProps>(
             SNAP_SPRING,
             (finished) => {
               if (finished) {
-                if (onAnimate) runOnJS(notifyAnimate)(dismissTarget)
+                if (onAnimate) runOnJS(notifyAnimate)(-1)
                 runOnJS(handleDismissComplete)()
               }
             }
           )
         } else {
+          const snapIdx = snapsUI.value.indexOf(target)
           translateY.value = withSpring(target, SNAP_SPRING, (finished) => {
-            if (finished && onAnimate) runOnJS(notifyAnimate)(target)
+            if (finished && onAnimate) runOnJS(notifyAnimate)(snapIdx)
           })
-          const index = snapsUI.value.indexOf(target)
-          if (onSnap) runOnJS(onSnap)(index)
+          if (onSnap) runOnJS(onSnap)(snapIdx)
           if (enableHaptics) runOnJS(triggerHaptic)()
         }
       })
@@ -1021,7 +947,7 @@ export const BottomSheet = forwardRef<BottomSheetRef, BottomSheetProps>(
             sheetStyle,
           ]}
           accessibilityLabel={accessibilityLabel}
-          accessibilityRole={accessibilityRole as any}
+          accessibilityRole={accessibilityRole}
         >
           <BottomSheetHeader
             gesture={headerGesture}
