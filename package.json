@@ -2,14 +2,23 @@
   "name": "react-native-fluid-bottom-sheet",
   "version": "1.5.1",
   "description": "A performant, gesture-driven bottom sheet for React Native with snap points, search bar, and FlatList support.",
-  "main": "src/index.ts",
-  "types": "src/index.ts",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
   "react-native": "src/index.ts",
   "source": "src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "react-native": "./src/index.ts",
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
   "files": [
     "src",
     "lib",
-    "!**/__tests__"
+    "!**/__tests__",
+    "!**/*.tsbuildinfo"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
@@ -36,13 +45,11 @@
     "url": "https://github.com/anmetrics/react-native-fluid-bottom-sheet/issues"
   },
   "homepage": "https://github.com/anmetrics/react-native-fluid-bottom-sheet#readme",
-  "dependencies": {
-    "react-native-keyboard-controller": "1.21.7"
-  },
   "peerDependencies": {
     "react": ">=18.0.0",
     "react-native": ">=0.71.0",
     "react-native-gesture-handler": ">=2.0.0",
+    "react-native-keyboard-controller": ">=1.21.7",
     "react-native-reanimated": ">=3.4.0",
     "react-native-safe-area-context": ">=4.0.0"
   },
@@ -51,6 +58,7 @@
     "react": "^18.2.0",
     "react-native": "^0.73.0",
     "react-native-gesture-handler": "^2.14.0",
+    "react-native-keyboard-controller": "^1.21.7",
     "react-native-reanimated": "^3.6.0",
     "react-native-safe-area-context": "^4.8.0",
     "typescript": "^5.3.0"
