@@ -27,3 +27,13 @@ export interface BottomSheetDynamicSizingContextValue {
 
 export const BottomSheetDynamicSizingCtx =
   createContext<BottomSheetDynamicSizingContextValue | null>(null)
+
+/**
+ * Provider-level keyboard engine selection. Read by `<BottomSheet>` when its
+ * own `keyboardMode` prop is not set. `null` when no provider is mounted —
+ * `<BottomSheet>` then falls back to its built-in default ('animated').
+ */
+export type BottomSheetKeyboardMode = 'animated' | 'handler'
+
+export const BottomSheetKeyboardModeCtx =
+  createContext<BottomSheetKeyboardMode | null>(null)

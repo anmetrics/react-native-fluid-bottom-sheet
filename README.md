@@ -7,7 +7,7 @@ A performant, gesture-driven bottom sheet for React Native. Built on `react-nati
 - Spring-driven animation with rubber-band overdrag
 - Single or multiple snap points; drag-up-to-expand from the inner list
 - **Dynamic sizing** — pass `enableDynamicSizing` and the sheet auto-fits to your content via `<BottomSheetView>` / `<BottomSheetScrollView>`. No hand-rolled measurement hooks; jitter and ratchet are handled internally.
-- Frame-perfect keyboard tracking via `useAnimatedKeyboard` (iOS, Android non-edge-to-edge with `adjustResize`, Android edge-to-edge — including correct handling of keyboard-type swaps)
+- Frame-perfect keyboard tracking via `useAnimatedKeyboard` by default (iOS, Android non-edge-to-edge with `adjustResize`, Android edge-to-edge — including correct handling of keyboard-type swaps). Optionally swap to `useKeyboardHandler` from `react-native-keyboard-controller` per-app via `keyboardMode`.
 - Sheet bottom respects the bottom safe area when the keyboard is hidden
 - Optional search bar and `BottomSheetFlatList` with seamless scroll → drag handoff
 - Portal-style `<BottomSheetModal>` for sheets that need to escape a parent's React tree (avoids the "VirtualizedLists nested inside ScrollViews" warning when one sheet's content opens another)
@@ -26,15 +26,16 @@ npm install react-native-fluid-bottom-sheet
 npm install react-native-reanimated react-native-gesture-handler react-native-safe-area-context
 ```
 
-| Peer | Required version |
-|------|------------------|
-| `react` | `>=18.0.0` |
-| `react-native` | `>=0.71.0` |
-| `react-native-reanimated` | `>=3.4.0` |
-| `react-native-gesture-handler` | `>=2.0.0` |
-| `react-native-safe-area-context` | `>=4.0.0` |
+| Peer | Required version | Required? |
+|------|------------------|-----------|
+| `react` | `>=18.0.0` | yes |
+| `react-native` | `>=0.71.0` | yes |
+| `react-native-reanimated` | `>=3.4.0` | yes |
+| `react-native-gesture-handler` | `>=2.0.0` | yes |
+| `react-native-safe-area-context` | `>=4.0.0` | yes |
+| `react-native-keyboard-controller` | `>=1.21.7` | **optional** — only when `keyboardMode="handler"` |
 
-`react-native-keyboard-controller` is bundled as a regular dependency — it ships native code and is required for the sheet's keyboard tracking. After installing this library you'll need to rebuild your app once (`pod install` for iOS / a Gradle rebuild for Android) so its native module is linked. Expo users: it's compatible with EAS dev builds; not with Expo Go.
+By default the library tracks the keyboard via `useAnimatedKeyboard` from `react-native-reanimated` — no extra dependency, no extra native rebuild. `react-native-keyboard-controller` is declared as an *optional* peer dep and is loaded lazily (`require()` runs only on the first sheet mounted with `keyboardMode="handler"`). If you opt in, install it and rebuild your app once (`pod install` for iOS / a Gradle rebuild for Android). Expo users: compatible with EAS dev builds; not with Expo Go.
 
 ### Setup
 
@@ -58,7 +59,7 @@ export default function App() {
 
 `initialMetrics` is important — without it, `useSafeAreaInsets()` returns 0 on the first render and the sheet briefly anchors at the wrong position before insets propagate.
 
-The `KeyboardProvider` from `react-native-keyboard-controller` is wired internally by `<BottomSheetModalProvider>` (see below). You don't have to import or wrap with it yourself.
+No `<KeyboardProvider>` is needed for the default keyboard engine (`useAnimatedKeyboard`). If you opt in to `keyboardMode="handler"` on `<BottomSheetModalProvider>`, the provider auto-wraps `<KeyboardProvider>` for you — see [`<BottomSheetModalProvider>`](#bottomsheetmodalprovider) below.
 
 ### Android
 
@@ -262,6 +263,41 @@ The library uses `useAnimatedKeyboard` for the per-frame inset, plus a JS-thread
 
 `isStatusBarTranslucentAndroid` and `isNavigationBarTranslucentAndroid` are passed to `useAnimatedKeyboard` as `true` — required on Android edge-to-edge so the inset isn't double-counted with the nav bar.
 
+### Picking the keyboard engine — `keyboardMode`
+
+Two engines drive the per-frame keyboard inset. Pick one with the `keyboardMode` prop:
+
+| Mode | Source | When to use |
+|------|--------|-------------|
+| `'animated'` (default) | `useAnimatedKeyboard` from `react-native-reanimated` | Recommended default. Smaller dependency surface; the keyboard height is read directly from a reanimated shared value, so the sheet animates in lock-step with the OS curve on both platforms with no extra native callbacks. No `<KeyboardProvider>` is needed. |
+| `'handler'` | `useKeyboardHandler` from `react-native-keyboard-controller` | Per-frame native callbacks (`onStart` / `onMove` / `onEnd` / `onInteractive`). Pick this if you already depend on `KeyboardController` elsewhere and want the two flows to share the same event source, or if you need the explicit native-curve duration on iOS. Requires `<KeyboardProvider>` (the provider auto-wraps it for you in this mode). |
+
+**Best practice — set it once on the provider.** Sheets read `keyboardMode` from `<BottomSheetModalProvider>` via context, so you only need to declare it in one place. The provider also decides whether to auto-wrap `<KeyboardProvider>` based on this setting.
+
+```tsx
+// Default — useAnimatedKeyboard, no <KeyboardProvider> wrap
+<BottomSheetModalProvider>
+  <App />
+</BottomSheetModalProvider>
+
+// Opt in to react-native-keyboard-controller's useKeyboardHandler
+<BottomSheetModalProvider keyboardMode="handler">
+  <App />
+</BottomSheetModalProvider>
+```
+
+Per-sheet override (rarely needed — only for unusual cases where one sheet should use a different engine):
+
+```tsx
+<BottomSheet isVisible={open} onClose={...} keyboardMode="handler">
+  <BottomSheetView>...</BottomSheetView>
+</BottomSheet>
+```
+
+Resolution order: explicit prop on `<BottomSheet>` / `<BottomSheetModal>` > provider's `keyboardMode` > `'animated'`.
+
+Both engines respect `keyboardBehavior` (`'padding' | 'height' | 'none'`) the same way — switching modes does not change the sheet's avoidance strategy, only the source of the per-frame keyboard height.
+
 ## API
 
 ### `<BottomSheet>` props
@@ -285,6 +321,7 @@ The library uses `useAnimatedKeyboard` for the per-frame inset, plus a JS-thread
 | `theme` | `BottomSheetTheme` | — | Color overrides; see [Theme](#theme). |
 | `containerStyle` | `StyleProp<ViewStyle>` | — | Extra styles applied to the sheet container. |
 | `keyboardBehavior` | `'padding' \| 'height' \| 'none'` | `'padding'` | See [Keyboard handling](#keyboard-handling). |
+| `keyboardMode` | `'animated' \| 'handler'` | `'animated'` | Which engine drives keyboard tracking — `useAnimatedKeyboard` (reanimated) or `useKeyboardHandler` (`react-native-keyboard-controller`). See [Picking the keyboard engine](#picking-the-keyboard-engine--keyboardmode). |
 | `topInset` | `number` | `max(safeAreaTop, StatusBar.currentHeight)` | Minimum Y the sheet's top can reach. Pass a larger value to keep the sheet under a custom in-screen header. |
 | `enableDynamicSizing` | `boolean` | `false` | Auto-size the sheet to content via `<BottomSheetView>` / `<BottomSheetScrollView>`. Overrides `snapPoint` / `snapPoints`. |
 | `minDynamicSnapFraction` | `number` | `0.3` | Lower bound on the auto-sized snap fraction; also the snap used before the first content measurement arrives. |
@@ -337,17 +374,30 @@ import { BottomSheetModalProvider } from 'react-native-fluid-bottom-sheet'
 
 Mount once near the root, inside any context the modal's content should inherit. Required for any `<BottomSheetModal>` consumer; throws if missing.
 
-Internally wraps `<KeyboardProvider>` from `react-native-keyboard-controller` so consumers don't have to. If you already mount your own `KeyboardProvider` higher in the tree (e.g. to pass a non-default config), opt out of the auto-wrap:
+Pick the keyboard engine once at the provider — sheets mounted underneath inherit it via context (and a per-sheet `keyboardMode` prop overrides if needed). The provider auto-wraps `<KeyboardProvider>` from `react-native-keyboard-controller` only when actually needed.
 
 ```tsx
-<BottomSheetModalProvider wrapKeyboardProvider={false}>
-  {/* your tree, with your own <KeyboardProvider> elsewhere */}
+// Default — useAnimatedKeyboard, no <KeyboardProvider> wrap
+<BottomSheetModalProvider>
+  <App />
+</BottomSheetModalProvider>
+
+// Opt in to react-native-keyboard-controller's useKeyboardHandler
+// (provider auto-wraps <KeyboardProvider> for you)
+<BottomSheetModalProvider keyboardMode="handler">
+  <App />
+</BottomSheetModalProvider>
+
+// You already mount your own <KeyboardProvider> higher in the tree
+<BottomSheetModalProvider keyboardMode="handler" wrapKeyboardProvider={false}>
+  <App />
 </BottomSheetModalProvider>
 ```
 
 | Prop | Type | Default | Description |
 |------|------|---------|-------------|
-| `wrapKeyboardProvider` | `boolean` | `true` | Auto-wraps `<KeyboardProvider>` inside the provider. Set to `false` if you mount your own. |
+| `keyboardMode` | `'animated' \| 'handler'` | `'animated'` | Engine that drives keyboard tracking for sheets under this provider. `'animated'` → `useAnimatedKeyboard` (reanimated). `'handler'` → `useKeyboardHandler` (`react-native-keyboard-controller`). Per-sheet `keyboardMode` prop overrides this. |
+| `wrapKeyboardProvider` | `boolean` | derived from `keyboardMode` (`'animated'`→`false`, `'handler'`→`true`) | Auto-wraps `<KeyboardProvider>` inside the provider. Set explicitly to override — e.g. `false` if you mount your own `<KeyboardProvider>` elsewhere. |
 
 ### `<BottomSheetView>` / `<BottomSheetScrollView>`
 

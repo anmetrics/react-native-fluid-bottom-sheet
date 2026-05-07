@@ -1,5 +1,6 @@
 import React, {
   useCallback,
+  useContext,
   useEffect,
   useMemo,
   useRef,
@@ -32,9 +33,7 @@ import Animated, {
   Extrapolation,
   scrollTo,
   withSpring,
-  withTiming,
   runOnJS,
-  cancelAnimation,
   type SharedValue,
 } from 'react-native-reanimated'
 import { Gesture, GestureDetector } from 'react-native-gesture-handler'
@@ -42,21 +41,19 @@ import {
   useSafeAreaInsets,
   initialWindowMetrics,
 } from 'react-native-safe-area-context'
-import {
-  useKeyboardHandler,
-  KeyboardController,
-} from 'react-native-keyboard-controller'
+
+import { AnimatedKbEngine } from './AnimatedKbEngine'
 
 import type { BottomSheetProps, BottomSheetRef } from './types'
 import type { BottomSheetScrollContext } from './context'
-import { BottomSheetScrollCtx, BottomSheetDynamicSizingCtx } from './context'
+import {
+  BottomSheetScrollCtx,
+  BottomSheetDynamicSizingCtx,
+  BottomSheetKeyboardModeCtx,
+} from './context'
 import { SearchBar } from './SearchBar'
 import { SNAP_SPRING, DEFAULT_THEME } from './constants'
 import { rubberBand, findTargetSnap, computeSnapPositions } from './worklets'
-
-// Captured at module scope so worklets receive a primitive constant rather
-// than reaching into the `Platform` object on the UI thread.
-const IS_IOS = Platform.OS === 'ios'
 
 /** Optional haptic feedback helper */
 const triggerHaptic = () => {
@@ -257,6 +254,7 @@ export const BottomSheet = forwardRef<BottomSheetRef, BottomSheetProps>(
       // (Android softInputMode='adjustResize'), the shift accounts for that
       // and only fills the remaining gap.
       keyboardBehavior = 'padding',
+      keyboardMode: keyboardModeProp,
       topInset: topInsetProp,
       enableDynamicSizing = false,
       minDynamicSnapFraction = 0.3,
@@ -357,75 +355,53 @@ export const BottomSheet = forwardRef<BottomSheetRef, BottomSheetProps>(
     // Driving `kbDriven` directly from these events means no curve
     // approximation, no JS-thread → UI-thread bridging cost mid-animation,
     // and no race between two animation sources.
+    // Resolve `keyboardMode`: explicit prop > provider context > 'animated'.
+    // Provider-level setting lets the consumer pick the engine once at the
+    // app root; per-sheet prop is an escape hatch for unusual cases.
+    const keyboardModeFromCtx = useContext(BottomSheetKeyboardModeCtx)
+    const keyboardMode = keyboardModeProp ?? keyboardModeFromCtx ?? 'animated'
+
     const shouldHandleKeyboard = keyboardBehavior !== 'none'
+    const useAnimatedKb = keyboardMode === 'animated'
 
     // JS-thread mirror of "keyboard is currently shown". Read by
     // `setContentHeight` to filter focus-induced layout grows of the
     // *measured content state* while the keyboard is active.
     const keyboardActiveRef = useRef(false)
-    // Initialize from the library's last-known state so the sheet renders
-    // correctly when it mounts with the keyboard already visible (e.g.
-    // navigating into a screen that auto-focuses an input). Without this
-    // seed, `useKeyboardHandler` wouldn't fire any events (the keyboard
-    // isn't moving) and `kbDriven` would stay at 0 until the next show /
-    // hide event.
-    const kbDriven = useSharedValue(
-      KeyboardController.isVisible() ? KeyboardController.state().height : 0
-    )
-    useEffect(() => {
-      if (KeyboardController.isVisible()) {
-        keyboardActiveRef.current = true
-      }
-    }, [])
+    // `kbDriven` is the per-frame keyboard height read by `sheetStyle`.
+    // Whichever engine is active (Animated / Handler) is the sole writer.
+    // Seeded to 0 — engines self-seed from their respective sources when
+    // the sheet mounts with the keyboard already visible.
+    const kbDriven = useSharedValue(0)
 
-    useKeyboardHandler(
-      {
-        onStart: (e) => {
-          'worklet'
-          if (!shouldHandleKeyboard) return
-          // iOS: this is the only event that carries the destination
-          // height + the OS animation duration. Match the native curve
-          // exactly with `withTiming(e.height, { duration: e.duration })`.
-          // Android: `onMove` will drive per-frame from here, so we don't
-          // need to animate on start.
-          if (IS_IOS) {
-            // Defensive: some iOS edge cases (interactive dismiss, modal
-            // transitions) can deliver duration <= 0; clamp to a sane
-            // minimum so `withTiming` doesn't degenerate into a snap.
-            const duration = e.duration > 0 ? e.duration : 250
-            kbDriven.value = withTiming(e.height, { duration })
-          }
-        },
-        onMove: (e) => {
-          'worklet'
-          if (!shouldHandleKeyboard) return
-          // Android only — per-frame native height. Pixel-perfect
-          // tracking, including in-place text↔numeric keyboard swaps.
-          if (!IS_IOS) {
-            cancelAnimation(kbDriven)
-            kbDriven.value = e.height
-          }
-        },
-        onEnd: (e) => {
-          'worklet'
-          if (!shouldHandleKeyboard) return
-          // Final landing — Android's last frame, or iOS's settle event.
-          // On iOS we let `withTiming` from `onStart` reach its target;
-          // overriding here would cause a final-frame snap.
-          if (!IS_IOS) {
-            kbDriven.value = e.height
-          }
-        },
-        onInteractive: (e) => {
-          'worklet'
-          if (!shouldHandleKeyboard) return
-          // Interactive (drag-down) keyboard dismiss — both platforms.
-          cancelAnimation(kbDriven)
-          kbDriven.value = e.height
-        },
-      },
-      [shouldHandleKeyboard]
-    )
+    // Lazy-load the 'handler' engine. `require()` runs only when a sheet
+    // first mounts with `keyboardMode === 'handler'`, which avoids
+    // evaluating `react-native-keyboard-controller`'s JS module (and
+    // spinning up its native bindings on first event registration) for
+    // consumers running the default 'animated' engine.
+    const HandlerKbEngine = useMemo<
+      | (typeof import('./HandlerKbEngine'))['HandlerKbEngine']
+      | null
+    >(() => {
+      if (useAnimatedKb) return null
+      try {
+        return require('./HandlerKbEngine').HandlerKbEngine
+      } catch (err) {
+        // The 'handler' engine depends on `react-native-keyboard-controller`,
+        // which is an *optional* peer dep — only required when the consumer
+        // opts in to `keyboardMode="handler"`. If the package isn't
+        // installed, `require('./HandlerKbEngine')` re-throws its module
+        // resolution error here. Surface a clear, actionable message.
+        throw new Error(
+          '[react-native-fluid-bottom-sheet] keyboardMode="handler" requires ' +
+            '`react-native-keyboard-controller` to be installed in your app.\n\n' +
+            '  • Install it:  npm install react-native-keyboard-controller\n' +
+            '  • Or use the default engine:  keyboardMode="animated"\n\n' +
+            'Original error: ' +
+            (err instanceof Error ? err.message : String(err))
+        )
+      }
+    }, [useAnimatedKb])
 
     // Plain JS keyboard listeners — only used to flip `keyboardActiveRef`
     // (the content-size filter flag). No animation logic here.
@@ -1004,6 +980,18 @@ export const BottomSheet = forwardRef<BottomSheetRef, BottomSheetProps>(
 
     return (
       <View style={StyleSheet.absoluteFill}>
+        {useAnimatedKb ? (
+          <AnimatedKbEngine
+            kbDriven={kbDriven}
+            shouldHandleKeyboard={shouldHandleKeyboard}
+          />
+        ) : HandlerKbEngine ? (
+          <HandlerKbEngine
+            kbDriven={kbDriven}
+            shouldHandleKeyboard={shouldHandleKeyboard}
+            keyboardActiveRef={keyboardActiveRef}
+          />
+        ) : null}
         <BottomSheetBackdrop
           translateY={translateY}
           maxHeight={maxSheetHeightSV}

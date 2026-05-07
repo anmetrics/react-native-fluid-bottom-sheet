@@ -9,6 +9,11 @@ import React, {
 } from 'react'
 import { KeyboardProvider } from 'react-native-keyboard-controller'
 
+import {
+  BottomSheetKeyboardModeCtx,
+  type BottomSheetKeyboardMode,
+} from './context'
+
 // ─────────────────────────────────────────────────────────────────────────────
 // BottomSheetModalProvider — provides a "host" location at the top of the
 // React tree where `BottomSheetModal` instances render. Each modal
@@ -49,23 +54,43 @@ export function useBottomSheetModalContext(): BottomSheetModalContextValue {
 export interface BottomSheetModalProviderProps {
   children?: ReactNode
   /**
+   * Which engine drives keyboard tracking for sheets mounted under this
+   * provider. Sheets read this via context; an explicit `keyboardMode`
+   * prop on a `<BottomSheet>` / `<BottomSheetModal>` overrides it.
+   *   • 'animated' (default) — `useAnimatedKeyboard` from
+   *     `react-native-reanimated`. No `KeyboardProvider` is needed; the
+   *     provider skips wrapping it by default in this mode.
+   *   • 'handler' — `useKeyboardHandler` from
+   *     `react-native-keyboard-controller`. Requires `<KeyboardProvider>`
+   *     in the tree; the provider wraps one automatically in this mode.
+   */
+  keyboardMode?: BottomSheetKeyboardMode
+  /**
    * Whether to wrap the provider's tree in `<KeyboardProvider>` from
-   * `react-native-keyboard-controller`. Defaults to `true` so consumers
-   * don't have to know about that dependency.
+   * `react-native-keyboard-controller`.
    *
-   * Set to `false` if you mount your own `<KeyboardProvider>` higher in
-   * the tree (e.g. you need a non-default config such as a different
-   * `statusBarTranslucent` flag). Mounting two KeyboardProviders in the
-   * same tree double-registers the native keyboard listeners, which
-   * works but doubles the work done per keyboard event.
+   * Default is derived from `keyboardMode`:
+   *   • `'animated'` → `false` (no `KeyboardProvider` needed).
+   *   • `'handler'`  → `true`  (auto-wrap so consumers don't have to).
+   *
+   * Set explicitly to override — e.g. `false` if you mount your own
+   * `<KeyboardProvider>` higher in the tree (a different
+   * `statusBarTranslucent` config), or `true` even in `'animated'` mode
+   * if other parts of your app use `react-native-keyboard-controller`.
+   * Mounting two KeyboardProviders in the same tree double-registers the
+   * native keyboard listeners, which works but doubles the work done per
+   * keyboard event.
    */
   wrapKeyboardProvider?: boolean
 }
 
 export function BottomSheetModalProvider({
   children,
-  wrapKeyboardProvider = true,
+  keyboardMode = 'animated',
+  wrapKeyboardProvider,
 }: BottomSheetModalProviderProps) {
+  const shouldWrapKeyboardProvider =
+    wrapKeyboardProvider ?? keyboardMode === 'handler'
   // `nodes` is a flat object so React can diff the rendered modals by key
   // when entries are added / updated / removed.
   const [nodes, setNodes] = useState<ModalNodes>({})
@@ -91,14 +116,16 @@ export function BottomSheetModalProvider({
   const value = useMemo(() => ({ mount, unmount }), [mount, unmount])
 
   const tree = (
-    <BottomSheetModalContext.Provider value={value}>
-      {children}
-      {Object.entries(nodes).map(([id, node]) => (
-        <Fragment key={id}>{node}</Fragment>
-      ))}
-    </BottomSheetModalContext.Provider>
+    <BottomSheetKeyboardModeCtx.Provider value={keyboardMode}>
+      <BottomSheetModalContext.Provider value={value}>
+        {children}
+        {Object.entries(nodes).map(([id, node]) => (
+          <Fragment key={id}>{node}</Fragment>
+        ))}
+      </BottomSheetModalContext.Provider>
+    </BottomSheetKeyboardModeCtx.Provider>
   )
 
-  if (!wrapKeyboardProvider) return tree
+  if (!shouldWrapKeyboardProvider) return tree
   return <KeyboardProvider>{tree}</KeyboardProvider>
 }

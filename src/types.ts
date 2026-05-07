@@ -91,6 +91,18 @@ export interface BottomSheetProps {
   keyboardBehavior?: 'padding' | 'height' | 'none'
 
   /**
+   * Which engine drives keyboard tracking.
+   *   • 'animated' (default) — `useAnimatedKeyboard` from
+   *     `react-native-reanimated`. Keyboard height comes from a reanimated
+   *     shared value, so the sheet animates in lock-step with the OS curve
+   *     on both platforms with no extra native callbacks.
+   *   • 'handler' — `useKeyboardHandler` from
+   *     `react-native-keyboard-controller`. Per-frame native callbacks;
+   *     useful if you already depend on `KeyboardController` elsewhere.
+   */
+  keyboardMode?: 'animated' | 'handler'
+
+  /**
    * Minimum top Y the sheet can reach when shifted up by the keyboard.
    * Use this to prevent the sheet from overlapping a custom header above it.
    * Defaults to max(useSafeAreaInsets().top, StatusBar.currentHeight).

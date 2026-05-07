@@ -104,6 +104,7 @@ export const BottomSheetModal = forwardRef<
         closeButtonAccessibilityLabel={props.closeButtonAccessibilityLabel}
         enableHaptics={props.enableHaptics}
         keyboardBehavior={props.keyboardBehavior}
+        keyboardMode={props.keyboardMode}
         topInset={props.topInset}
         enableDynamicSizing={props.enableDynamicSizing}
         minDynamicSnapFraction={props.minDynamicSnapFraction}
@@ -136,6 +137,7 @@ export const BottomSheetModal = forwardRef<
       props.closeButtonAccessibilityLabel,
       props.enableHaptics,
       props.keyboardBehavior,
+      props.keyboardMode,
       props.topInset,
       props.enableDynamicSizing,
       props.minDynamicSnapFraction,
