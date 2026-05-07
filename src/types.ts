@@ -1,4 +1,4 @@
-import type { StyleProp, ViewStyle } from 'react-native'
+import type { StyleProp, ViewStyle, AccessibilityRole } from 'react-native'
 
 export interface BottomSheetTheme {
   /** Sheet background color. Default: '#FFFFFF' */
@@ -79,7 +79,7 @@ export interface BottomSheetProps {
 
   // --- Accessibility ---
   accessibilityLabel?: string
-  accessibilityRole?: string
+  accessibilityRole?: AccessibilityRole
   closeButtonAccessibilityLabel?: string
 
   // --- Haptics ---
@@ -99,7 +99,8 @@ export interface BottomSheetProps {
 
   // --- Callbacks ---
   onSnap?: (index: number) => void
-  onAnimate?: (fromValue: number, toValue: number) => void
+  /** Fires when an animation completes. `toIndex` is the destination snap index, or `-1` when closing. */
+  onAnimate?: (toIndex: number) => void
 }
 
 export interface BottomSheetRef {

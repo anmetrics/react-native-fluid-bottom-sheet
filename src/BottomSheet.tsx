@@ -113,7 +113,7 @@ const BottomSheetBackdrop = memo(function BottomSheetBackdrop({
 })
 
 interface HeaderProps {
-  gesture: any
+  gesture: ReturnType<typeof Gesture.Pan>
   showHandle: boolean
   handleColor: string
   title?: string
@@ -717,10 +717,10 @@ export const BottomSheet = forwardRef<BottomSheetRef, BottomSheetProps>(
     // ── Callbacks ──
 
     const notifyAnimate = useCallback(
-      (target: number) => {
-        onAnimate?.(target, maxSheetHeightSV.value)
+      (toIndex: number) => {
+        onAnimate?.(toIndex)
       },
-      [onAnimate, maxSheetHeightSV]
+      [onAnimate]
     )
 
     const handleDismissComplete = useCallback(() => {
@@ -731,9 +731,10 @@ export const BottomSheet = forwardRef<BottomSheetRef, BottomSheetProps>(
     const open = useCallback(() => {
       setRenderSheet(true)
       const snaps = snapsUI.value
-      const target = snaps[Math.min(initialSnapIndex, snaps.length - 1)]
+      const snapIdx = Math.min(initialSnapIndex, snaps.length - 1)
+      const target = snaps[snapIdx]
       translateY.value = withSpring(target, SNAP_SPRING, (finished) => {
-        if (finished && onAnimate) runOnJS(notifyAnimate)(target)
+        if (finished && onAnimate) runOnJS(notifyAnimate)(snapIdx)
       })
     }, [initialSnapIndex, translateY, notifyAnimate, onAnimate, snapsUI])
 
@@ -743,7 +744,7 @@ export const BottomSheet = forwardRef<BottomSheetRef, BottomSheetProps>(
       const dismissTarget = maxSheetHeightSV.value + bottomInsetSV.value
       translateY.value = withSpring(dismissTarget, SNAP_SPRING, (finished) => {
         if (finished) {
-          if (onAnimate) runOnJS(notifyAnimate)(dismissTarget)
+          if (onAnimate) runOnJS(notifyAnimate)(-1)
           runOnJS(handleDismissComplete)()
         }
       })
@@ -759,27 +760,27 @@ export const BottomSheet = forwardRef<BottomSheetRef, BottomSheetProps>(
     useImperativeHandle(ref, () => ({
       expand: (index?: number) => {
         const snaps = snapsUI.value
-        const target =
-          index !== undefined
-            ? snaps[Math.min(index, snaps.length - 1)]
-            : snaps[0]
+        const snapIdx = index !== undefined ? Math.min(index, snaps.length - 1) : 0
+        const target = snaps[snapIdx]
         translateY.value = withSpring(target, SNAP_SPRING, (finished) => {
-          if (finished && onAnimate) runOnJS(notifyAnimate)(target)
+          if (finished && onAnimate) runOnJS(notifyAnimate)(snapIdx)
         })
       },
       collapse: () => {
         const snaps = snapsUI.value
-        const target = snaps[snaps.length - 1]
+        const snapIdx = snaps.length - 1
+        const target = snaps[snapIdx]
         translateY.value = withSpring(target, SNAP_SPRING, (finished) => {
-          if (finished && onAnimate) runOnJS(notifyAnimate)(target)
+          if (finished && onAnimate) runOnJS(notifyAnimate)(snapIdx)
         })
       },
       close: () => close(),
       snapTo: (index: number) => {
         const snaps = snapsUI.value
-        const target = snaps[Math.min(index, snaps.length - 1)]
+        const snapIdx = Math.min(index, snaps.length - 1)
+        const target = snaps[snapIdx]
         translateY.value = withSpring(target, SNAP_SPRING, (finished) => {
-          if (finished && onAnimate) runOnJS(notifyAnimate)(target)
+          if (finished && onAnimate) runOnJS(notifyAnimate)(snapIdx)
         })
       },
     }))
@@ -840,17 +841,17 @@ export const BottomSheet = forwardRef<BottomSheetRef, BottomSheetProps>(
             SNAP_SPRING,
             (finished) => {
               if (finished) {
-                if (onAnimate) runOnJS(notifyAnimate)(dismissTarget)
+                if (onAnimate) runOnJS(notifyAnimate)(-1)
                 runOnJS(handleDismissComplete)()
               }
             }
           )
         } else {
+          const snapIndex = snapsUI.value.indexOf(target)
           translateY.value = withSpring(target, SNAP_SPRING, (finished) => {
-            if (finished && onAnimate) runOnJS(notifyAnimate)(target)
+            if (finished && onAnimate) runOnJS(notifyAnimate)(snapIndex)
           })
-          const index = snapsUI.value.indexOf(target)
-          if (onSnap) runOnJS(onSnap)(index)
+          if (onSnap) runOnJS(onSnap)(snapIndex)
           if (enableHaptics) runOnJS(triggerHaptic)()
         }
       })
@@ -916,17 +917,17 @@ export const BottomSheet = forwardRef<BottomSheetRef, BottomSheetProps>(
             SNAP_SPRING,
             (finished) => {
               if (finished) {
-                if (onAnimate) runOnJS(notifyAnimate)(dismissTarget)
+                if (onAnimate) runOnJS(notifyAnimate)(-1)
                 runOnJS(handleDismissComplete)()
               }
             }
           )
         } else {
+          const snapIndex = snapsUI.value.indexOf(target)
           translateY.value = withSpring(target, SNAP_SPRING, (finished) => {
-            if (finished && onAnimate) runOnJS(notifyAnimate)(target)
+            if (finished && onAnimate) runOnJS(notifyAnimate)(snapIndex)
           })
-          const index = snapsUI.value.indexOf(target)
-          if (onSnap) runOnJS(onSnap)(index)
+          if (onSnap) runOnJS(onSnap)(snapIndex)
           if (enableHaptics) runOnJS(triggerHaptic)()
         }
       })
@@ -1021,7 +1022,7 @@ export const BottomSheet = forwardRef<BottomSheetRef, BottomSheetProps>(
             sheetStyle,
           ]}
           accessibilityLabel={accessibilityLabel}
-          accessibilityRole={accessibilityRole as any}
+          accessibilityRole={accessibilityRole}
         >
           <BottomSheetHeader
             gesture={headerGesture}
