@@ -23,7 +23,7 @@ npm install react-native-fluid-bottom-sheet
 ### Peer dependencies
 
 ```bash
-npm install react-native-reanimated react-native-gesture-handler react-native-safe-area-context
+npm install react-native-reanimated react-native-gesture-handler react-native-safe-area-context react-native-keyboard-controller
 ```
 
 | Peer | Required version |
@@ -33,8 +33,9 @@ npm install react-native-reanimated react-native-gesture-handler react-native-sa
 | `react-native-reanimated` | `>=3.4.0` |
 | `react-native-gesture-handler` | `>=2.0.0` |
 | `react-native-safe-area-context` | `>=4.0.0` |
+| `react-native-keyboard-controller` | `>=1.21.7` |
 
-`react-native-keyboard-controller` is bundled as a regular dependency — it ships native code and is required for the sheet's keyboard tracking. After installing this library you'll need to rebuild your app once (`pod install` for iOS / a Gradle rebuild for Android) so its native module is linked. Expo users: it's compatible with EAS dev builds; not with Expo Go.
+All of these ship native code — after installing you'll need to rebuild your app once (`pod install` for iOS / a Gradle rebuild for Android) so their native modules are linked. Expo users: compatible with EAS dev builds; not with Expo Go.
 
 ### Setup
 
